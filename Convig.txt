@@ -1,0 +1,5 @@
+proudfarmingindia_db_user - AmBThJqcnzle5vlr
+
+mongodb+srv://proudfarmingindia_db_user:AmBThJqcnzle5vlr@cluster0.pwgwbds.mongodb.net/?appName=Cluster0
+
+proudfarmingindia_CricIn - 8S9F3qaYSpVmiXb9
