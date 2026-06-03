@@ -43,7 +43,16 @@ const inningsSchema = new mongoose.Schema(
     balls: {
       type: Number,
       default: 0,
-    }
+    },
+    isCompleted: {
+      type: Boolean,
+      default: false,
+    },
+
+    completedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

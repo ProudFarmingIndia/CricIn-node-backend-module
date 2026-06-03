@@ -46,3 +46,8 @@ export const deletePlayer = async (
     playerId
   );
 };
+
+export const getAllPlayers = async () => {
+  return await Player.find()
+    .populate("userId", "fullName phone");
+};

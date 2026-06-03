@@ -138,3 +138,16 @@ export const setCaptain = async (
     data: team,
   });
 };
+
+export const getAllTeams = async (
+  req: AuthRequest,
+  res: Response
+) => {
+  const teams =
+    await TeamService.getAllTeams();
+
+  res.status(200).json({
+    success: true,
+    data: teams,
+  });
+};

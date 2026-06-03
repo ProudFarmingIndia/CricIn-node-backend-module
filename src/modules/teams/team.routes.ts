@@ -3,6 +3,7 @@ import { Router } from "express";
 import {
   createTeam,
   getTeams,
+  getAllTeams,
   getTeamById,
   updateTeam,
   deleteTeam,
@@ -19,6 +20,12 @@ router.post(
   "/",
   authMiddleware,
   createTeam
+);
+
+router.get(
+  "/all",
+  authMiddleware,
+  getAllTeams
 );
 
 router.get(

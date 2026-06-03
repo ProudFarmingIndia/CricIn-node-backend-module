@@ -41,7 +41,18 @@ const scoringSchema = new mongoose.Schema(
     extraType: {
       type: String,
       default: null,
-    }
+    },
+
+    wicketType: {
+      type: String,
+      default: null,
+    },
+
+    dismissedPlayerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Player",
+      default: null,
+    },
   },
   {
     timestamps: true,

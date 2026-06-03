@@ -109,3 +109,122 @@ export const completeMatch = async (
     data: match,
   });
 };
+
+export const updateMatchResult = async (
+  req: AuthRequest,
+  res: Response
+) => {
+  const { winnerTeam, result } =
+    req.body;
+
+  const match =
+    await MatchService.updateMatchResult(
+      req.params.matchId as string,
+      winnerTeam,
+      result
+    );
+
+  res.status(200).json({
+    success: true,
+    data: match,
+  });
+};
+
+export const getLiveMatch = async (
+  req: AuthRequest,
+  res: Response
+) => {
+
+  const data =
+    await MatchService.getLiveMatch(
+      req.params.matchId as string
+    );
+
+  res.status(200).json({
+    success: true,
+    data,
+  });
+};
+
+export const getMatchSummary = async (
+  req: AuthRequest,
+  res: Response
+) => {
+
+  const data =
+    await MatchService.getMatchSummary(
+      req.params.matchId as string
+    );
+
+  res.status(200).json({
+    success: true,
+    data,
+  });
+};
+
+export const getBattingScorecard =
+async (
+  req: AuthRequest,
+  res: Response
+) => {
+
+  const data =
+    await MatchService.getBattingScorecard(
+      req.params.matchId as string
+    );
+
+  res.status(200).json({
+    success: true,
+    data,
+  });
+};
+
+export const getBowlingScorecard =
+async (
+  req: AuthRequest,
+  res: Response
+) => {
+
+  const data =
+    await MatchService.getBowlingScorecard(
+      req.params.matchId as string
+    );
+
+  res.status(200).json({
+    success: true,
+    data,
+  });
+};
+
+export const getFallOfWickets = async (
+  req: AuthRequest,
+  res: Response
+) => {
+
+  const data =
+    await MatchService.getFallOfWickets(
+      req.params.matchId as string
+    );
+
+  res.status(200).json({
+    success: true,
+    data,
+  });
+};
+
+export const getFullScorecard =
+async (
+  req: AuthRequest,
+  res: Response
+) => {
+
+  const data =
+    await MatchService.getFullScorecard(
+      req.params.matchId as string
+    );
+
+  res.status(200).json({
+    success: true,
+    data,
+  });
+};

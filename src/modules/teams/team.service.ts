@@ -97,3 +97,10 @@ export const setCaptain = async (
     }
   );
 };
+
+export const getAllTeams = async () => {
+  return await Team.find()
+    .populate("captainId")
+    .populate("viceCaptainId")
+    .populate("players");
+};

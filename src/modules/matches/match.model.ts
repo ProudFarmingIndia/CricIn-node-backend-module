@@ -67,6 +67,16 @@ const matchSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    winnerTeam: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Team",
+      default: null,
+    },
+
+    result: {
+      type: String,
+      default: "",
+    },
   },
   {
     timestamps: true,
