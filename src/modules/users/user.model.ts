@@ -20,17 +20,28 @@ const userSchema = new mongoose.Schema(
 
     role: {
       type: String,
+      enum: [
+        "user",
+        "player",
+        "captain",
+        "ground_owner",
+        "shop_owner",
+        "admin",
+      ],
       default: "user",
     },
 
     isVerified: {
       type: Boolean,
-      default: true,
+      default: false,
     },
+    otp: { type: String, default: null },
+    otpExpiry: { type: Date, default: null },
+    lastLoginAt: { type: Date, default: null },
   },
   {
     timestamps: true,
-  }
+  },
 );
 
 const User = mongoose.model("User", userSchema);

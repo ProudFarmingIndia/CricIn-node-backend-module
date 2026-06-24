@@ -1,8 +1,17 @@
 import { Router } from "express";
-import { login } from "./auth.controller";
+
+import {
+  sendOtp,
+  verifyOtp,
+  resendOtp,
+} from "./auth.controller";
 
 const router = Router();
 
-router.post("/login", login);
+router.post("/send-otp", sendOtp);
+
+router.post("/verify-otp", verifyOtp);
+
+router.post("/resend-otp", resendOtp);
 
 export default router;

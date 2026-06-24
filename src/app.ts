@@ -13,6 +13,7 @@ import notificationRoutes from "./modules/notifications/notification.routes";
 import followRoutes from "./modules/follows/follow.routes";
 import chatRoutes from "./modules/chat/chat.routes";
 import feedRoutes from "./modules/feed/feed.routes";
+import uploadRoutes from "./shared/uploads/upload.routes";
 
 const app = express();
 
@@ -30,6 +31,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/follows", followRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/feed", feedRoutes);
+app.use("/api/uploads", uploadRoutes);
 
 app.get("/", (_, res) => {
   res.send("Backend Running");

@@ -1,20 +1,25 @@
 import { Router } from "express";
 
+import { authMiddleware } from "../../shared/middleware/auth.middleware";
 import {
   createPlayer,
-  getPlayers,
-  getAllPlayers,
-  getPlayerById,
-  updatePlayer,
   deletePlayer,
+  getAllPlayers,
+  getMyPlayerProfile,
+  getPlayerById,
+  getPlayers,
   getPlayerStats,
+  updateMyPlayerProfile,
+  updatePlayer,
 } from "./player.contoller";
-
-import { authMiddleware } from "../../shared/middleware/auth.middleware";
 
 const router = Router();
 
 router.post("/", authMiddleware, createPlayer);
+
+router.get("/me", authMiddleware, getMyPlayerProfile);
+
+router.put("/me", authMiddleware, updateMyPlayerProfile);
 
 router.get("/", authMiddleware, getPlayers);
 

@@ -1,15 +1,24 @@
-import Player from "./player.mode";
+import Player from "./player.model";
 
 export const createPlayer = async (
   userId: string,
   payload: any
 ) => {
-  const player = await Player.create({
+  const existingPlayer =
+    await Player.findOne({
+      userId,
+    });
+
+  if (existingPlayer) {
+    throw new Error(
+      "Player profile already exists"
+    );
+  }
+
+  return await Player.create({
     ...payload,
     userId,
   });
-
-  return player;
 };
 
 export const getPlayers = async (
@@ -20,11 +29,47 @@ export const getPlayers = async (
   });
 };
 
+export const getAllPlayers = async () => {
+  return await Player.find()
+    .populate(
+      "userId",
+      "fullName phone"
+    );
+};
+
 export const getPlayerById = async (
   playerId: string
 ) => {
-  return await Player.findById(playerId);
+  return await Player.findById(
+    playerId
+  );
 };
+
+export const getMyPlayerProfile =
+  async (userId: string) => {
+    return await Player.findOne({
+      userId,
+    }).populate(
+      "teams",
+      "teamName logo"
+    );
+  };
+
+export const updateMyPlayerProfile =
+  async (
+    userId: string,
+    payload: any
+  ) => {
+    return await Player.findOneAndUpdate(
+      {
+        userId,
+      },
+      payload,
+      {
+        new: true,
+      }
+    );
+  };
 
 export const updatePlayer = async (
   playerId: string,
@@ -45,9 +90,4 @@ export const deletePlayer = async (
   return await Player.findByIdAndDelete(
     playerId
   );
-};
-
-export const getAllPlayers = async () => {
-  return await Player.find()
-    .populate("userId", "fullName phone");
 };
