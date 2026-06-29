@@ -82,7 +82,7 @@ export const verifyOtpService = async (phone: string, otp: string) => {
 
   await user.save();
 
-  const secret: Secret = process.env.JWT_SECRET || "dev_secret";
+  const secret = process.env.JWT_ACCESS_SECRET as string;
 
   const token = jwt.sign(
     {

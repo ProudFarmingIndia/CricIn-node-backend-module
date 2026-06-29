@@ -1,13 +1,18 @@
 import Player from "./player.model";
 
+/*
+|--------------------------------------------------------------------------
+| Create Player Profile
+|--------------------------------------------------------------------------
+*/
+
 export const createPlayer = async (
   userId: string,
   payload: any
 ) => {
-  const existingPlayer =
-    await Player.findOne({
-      userId,
-    });
+  const existingPlayer = await Player.findOne({
+    userId,
+  });
 
   if (existingPlayer) {
     throw new Error(
@@ -17,9 +22,22 @@ export const createPlayer = async (
 
   return await Player.create({
     ...payload,
+
     userId,
+
+    profileImage:
+      payload.profileImage || null,
+
+    gallery:
+      payload.gallery || [],
   });
 };
+
+/*
+|--------------------------------------------------------------------------
+| Get Logged In Player
+|--------------------------------------------------------------------------
+*/
 
 export const getPlayers = async (
   userId: string
@@ -29,24 +47,54 @@ export const getPlayers = async (
   });
 };
 
-export const getAllPlayers = async () => {
-  return await Player.find()
-    .populate(
-      "userId",
-      "fullName phone"
-    );
-};
+/*
+|--------------------------------------------------------------------------
+| Get All Players
+|--------------------------------------------------------------------------
+*/
 
-export const getPlayerById = async (
-  playerId: string
-) => {
-  return await Player.findById(
-    playerId
-  );
-};
+export const getAllPlayers =
+  async () => {
+    return await Player.find()
+      .populate(
+        "userId",
+        "fullName phone"
+      )
+      .populate(
+        "teams",
+        "teamName logo"
+      );
+  };
+
+/*
+|--------------------------------------------------------------------------
+| Get Player By Id
+|--------------------------------------------------------------------------
+*/
+
+export const getPlayerById =
+  async (
+    playerId: string
+  ) => {
+    return await Player.findById(
+      playerId
+    )
+      .populate(
+        "teams",
+        "teamName logo"
+      );
+  };
+
+/*
+|--------------------------------------------------------------------------
+| Get My Profile
+|--------------------------------------------------------------------------
+*/
 
 export const getMyPlayerProfile =
-  async (userId: string) => {
+  async (
+    userId: string
+  ) => {
     return await Player.findOne({
       userId,
     }).populate(
@@ -54,6 +102,12 @@ export const getMyPlayerProfile =
       "teamName logo"
     );
   };
+
+/*
+|--------------------------------------------------------------------------
+| Update My Profile
+|--------------------------------------------------------------------------
+*/
 
 export const updateMyPlayerProfile =
   async (
@@ -64,30 +118,64 @@ export const updateMyPlayerProfile =
       {
         userId,
       },
-      payload,
+
+      {
+        ...payload,
+
+        ...(payload.profileImage && {
+          profileImage:
+            payload.profileImage,
+        }),
+
+        ...(payload.gallery && {
+          gallery:
+            payload.gallery,
+        }),
+      },
+
       {
         new: true,
+        runValidators: true,
       }
     );
   };
 
-export const updatePlayer = async (
-  playerId: string,
-  payload: any
-) => {
-  return await Player.findByIdAndUpdate(
-    playerId,
-    payload,
-    {
-      new: true,
-    }
-  );
-};
+/*
+|--------------------------------------------------------------------------
+| Update Player
+|--------------------------------------------------------------------------
+*/
 
-export const deletePlayer = async (
-  playerId: string
-) => {
-  return await Player.findByIdAndDelete(
-    playerId
-  );
-};
+export const updatePlayer =
+  async (
+    playerId: string,
+    payload: any
+  ) => {
+    return await Player.findByIdAndUpdate(
+      playerId,
+
+      {
+        ...payload,
+      },
+
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
+  };
+
+/*
+|--------------------------------------------------------------------------
+| Delete Player
+|--------------------------------------------------------------------------
+*/
+
+export const deletePlayer =
+  async (
+    playerId: string
+  ) => {
+    return await Player.findByIdAndDelete(
+      playerId
+    );
+  };
