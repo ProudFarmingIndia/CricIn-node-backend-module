@@ -14,10 +14,9 @@ const playerSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
-
     profileImage: {
-      type: String,
-      default: "",
+      url: String,
+      publicId: String,
     },
 
     bio: {
@@ -53,12 +52,7 @@ const playerSchema = new mongoose.Schema(
 
     playerType: {
       type: String,
-      enum: [
-        "Batsman",
-        "Bowler",
-        "All-Rounder",
-        "Wicket Keeper",
-      ],
+      enum: ["Batsman", "Bowler", "All-Rounder", "Wicket Keeper"],
       required: true,
     },
 
@@ -123,9 +117,17 @@ const playerSchema = new mongoose.Schema(
 
     highlights: [String],
 
-    galleryImages: [String],
-
-    galleryVideos: [String],
+    gallery: [
+      {
+        type: {
+          type: String,
+          enum: ["IMAGE", "VIDEO"],
+        },
+        url: String,
+        publicId: String,
+        uploadedAt: Date,
+      },
+    ],
 
     ranking: {
       city: {
@@ -238,10 +240,7 @@ const playerSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-  }
+  },
 );
 
-export default mongoose.model(
-  "Player",
-  playerSchema
-);
+export default mongoose.model("Player", playerSchema);
