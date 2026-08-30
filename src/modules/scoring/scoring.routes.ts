@@ -1,7 +1,13 @@
 import { Router } from "express";
 
 import { authMiddleware } from "../../shared/middleware/auth.middleware";
-import { addBall, getScorecard } from "./scoring.controller";
+import {
+  addBall,
+  getScorecard,
+  undoLastBall,
+  setNextBowler,
+  setNextBatsman,
+} from "./scoring.controller";
 import {
   createInnings,
   getInningsById,
@@ -32,6 +38,24 @@ router.post(
   "/ball",
   authMiddleware,
   addBall
+);
+
+router.put(
+  "/ball/next-batsman",
+  authMiddleware,
+  setNextBatsman
+);
+
+router.put(
+  "/ball/next-bowler",
+  authMiddleware,
+  setNextBowler
+);
+
+router.delete(
+  "/ball/:inningsId/undo",
+  authMiddleware,
+  undoLastBall
 );
 
 router.get(

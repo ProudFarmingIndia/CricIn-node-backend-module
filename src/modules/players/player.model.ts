@@ -2,21 +2,126 @@ import mongoose from "mongoose";
 
 const playerSchema = new mongoose.Schema(
   {
+    /*
+|--------------------------------------------------------------------------
+| Identity
+|--------------------------------------------------------------------------
+*/
+
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+
+      /*
+  Registered Players only.
+
+  Local Players will not have a User account.
+  */
+
+      default: null,
+
       unique: true,
+
+      sparse: true,
     },
+
+    /*
+|--------------------------------------------------------------------------
+| Local Player
+|--------------------------------------------------------------------------
+*/
+
+    isLocal: {
+      type: Boolean,
+      default: false,
+    },
+
+    /*
+|--------------------------------------------------------------------------
+| Creator
+|--------------------------------------------------------------------------
+|
+| User who created this Local Player.
+| Used later for ownership & claiming.
+|
+*/
+
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+
+    /*
+|--------------------------------------------------------------------------
+| Mobile
+|--------------------------------------------------------------------------
+*/
+
+    mobile: {
+      type: String,
+      trim: true,
+      default: null,
+      sparse: true,
+    },
+
+    /*
+|--------------------------------------------------------------------------
+| Claim Status
+|--------------------------------------------------------------------------
+|
+| Future:
+| Local player installs CricIn and claims this profile.
+|
+*/
+
+    isClaimed: {
+      type: Boolean,
+      default: false,
+    },
+
+    /*
+|--------------------------------------------------------------------------
+| Basic Information
+|--------------------------------------------------------------------------
+*/
 
     playerName: {
       type: String,
       required: true,
       trim: true,
     },
+
     profileImage: {
       url: String,
       publicId: String,
+    },
+
+    /*
+    |--------------------------------------------------------------------------
+    | Cover Photo
+    |--------------------------------------------------------------------------
+    |
+    | The banner behind the avatar on the profile header. Same
+    | { url, publicId } shape as profileImage and as Team.coverPhoto -
+    | publicId is kept so the previous image can be removed from
+    | Cloudinary when it is replaced.
+    |
+    | Defaults to "" rather than being absent, so the client can read
+    | coverPhoto.url without an existence check.
+    |
+    */
+
+    coverPhoto: {
+      url: {
+        type: String,
+        default: "",
+      },
+
+      publicId: {
+        type: String,
+        default: "",
+      },
     },
 
     bio: {
@@ -29,10 +134,24 @@ const playerSchema = new mongoose.Schema(
       default: null,
     },
 
+    /*
+    |--------------------------------------------------------------------------
+    | Gender
+    |--------------------------------------------------------------------------
+    |
+    | default was "" - which is NOT one of the enum values, so Mongoose's
+    | enum validator rejected it and any player saved without an explicit
+    | gender failed validation on create and on update.
+    |
+    | null is the correct "not set" value here: Mongoose skips enum
+    | validation for null/undefined on a field that isn't required.
+    |
+    */
+
     gender: {
       type: String,
       enum: ["Male", "Female", "Other"],
-      default: "",
+      default: null,
     },
 
     city: {

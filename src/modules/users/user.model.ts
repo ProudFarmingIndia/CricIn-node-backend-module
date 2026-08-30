@@ -38,6 +38,7 @@ const userSchema = new mongoose.Schema(
     otp: { type: String, default: null },
     otpExpiry: { type: Date, default: null },
     lastLoginAt: { type: Date, default: null },
+    expoPushToken: { type: String, default: null },
   },
   {
     timestamps: true,
