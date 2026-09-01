@@ -74,21 +74,39 @@ export const getPlayerById = async (req: AuthRequest, res: Response) => {
 };
 
 export const updatePlayer = async (req: AuthRequest, res: Response) => {
-  const player = await PlayerService.updatePlayer(req.params.id as string, req.body);
+  try {
+    const player = await PlayerService.updatePlayer(
+      req.user.userId,
+      req.params.id as string,
+      req.body,
+    );
 
-  res.status(200).json({
-    success: true,
-    data: player,
-  });
+    res.status(200).json({
+      success: true,
+      data: player,
+    });
+  } catch (error: any) {
+    res.status(400).json({
+      success: false,
+      message: error.message,
+    });
+  }
 };
 
 export const deletePlayer = async (req: AuthRequest, res: Response) => {
-  await PlayerService.deletePlayer(req.params.id as string);
+  try {
+    await PlayerService.deletePlayer(req.user.userId, req.params.id as string);
 
-  res.status(200).json({
-    success: true,
-    message: "Player deleted successfully",
-  });
+    res.status(200).json({
+      success: true,
+      message: "Player deleted successfully",
+    });
+  } catch (error: any) {
+    res.status(400).json({
+      success: false,
+      message: error.message,
+    });
+  }
 };
 
 export const getPlayerStats = async (req: AuthRequest, res: Response) => {

@@ -7,6 +7,7 @@ import {
   updateMatch,
   deleteMatch,
   startMatch,
+  verifyMatchPin,
   completeMatch,
   updateMatchResult,
   getLiveMatch,
@@ -15,6 +16,17 @@ import {
   getBowlingScorecard,
   getFallOfWickets,
   getFullScorecard,
+  getLiveMatchesFeed,
+  getUpcomingMatchesFeed,
+  getRecentMatchesFeed,
+  getScorecardByInnings,
+  getPartnerships,
+  requestConfirmation,
+  confirmMatch,
+  rejectMatchConfirmation,
+  resetMatchSetup,
+  getOverByOver,
+  transferScoring,
 } from "./match.controller";
 
 import { authMiddleware } from "../../shared/middleware/auth.middleware";
@@ -22,90 +34,74 @@ import { validateMatch } from "../../shared/validators/match.validator";
 
 const router = Router();
 
-router.post(
-  "/",
-  authMiddleware,
-  validateMatch,
-  createMatch
-);
+router.post("/", authMiddleware, validateMatch, createMatch);
 
-router.get(
-  "/",
-  authMiddleware,
-  getMatches
-);
+/*
+|--------------------------------------------------------------------------
+| Match Feed - MUST Be Registered Before Any /:matchId Or /:id Route
+|--------------------------------------------------------------------------
+*/
 
-router.get(
-  "/:matchId/live",
-  authMiddleware,
-  getLiveMatch
-);
+router.get("/feed/live", authMiddleware, getLiveMatchesFeed);
 
-router.get(
-  "/:matchId/batting-scorecard",
-  authMiddleware,
-  getBattingScorecard
-);
+router.get("/feed/upcoming", authMiddleware, getUpcomingMatchesFeed);
 
-router.get(
-  "/:id",
-  authMiddleware,
-  getMatchById
-);
+router.get("/feed/recent", authMiddleware, getRecentMatchesFeed);
 
-router.put(
-  "/:id",
-  authMiddleware,
-  updateMatch
-);
+router.get("/", authMiddleware, getMatches);
 
-router.delete(
-  "/:id",
-  authMiddleware,
-  deleteMatch
-);
+router.get("/:matchId/live", authMiddleware, getLiveMatch);
+
+router.get("/:matchId/batting-scorecard", authMiddleware, getBattingScorecard);
+
+router.get("/:matchId/scorecard", authMiddleware, getScorecardByInnings);
+
+router.get("/:matchId/partnerships", authMiddleware, getPartnerships);
+
+router.get("/:id", authMiddleware, getMatchById);
+
+router.put("/:id", authMiddleware, updateMatch);
+
+router.delete("/:id", authMiddleware, deleteMatch);
+
+router.put("/:matchId/start", authMiddleware, startMatch);
+
+router.post("/:matchId/verify-pin", authMiddleware, verifyMatchPin);
+
+router.put("/:matchId/complete", authMiddleware, completeMatch);
+
+router.put("/:matchId/result", authMiddleware, updateMatchResult);
 
 router.put(
-  "/:matchId/start",
+  "/:matchId/request-confirmation",
   authMiddleware,
-  startMatch
+  requestConfirmation,
 );
+
+router.put("/:matchId/confirm", authMiddleware, confirmMatch);
 
 router.put(
-  "/:matchId/complete",
+  "/:matchId/reject-confirmation",
   authMiddleware,
-  completeMatch
+  rejectMatchConfirmation,
 );
+
+router.get("/:matchId/summary", authMiddleware, getMatchSummary);
+
+router.put("/:matchId/reset-setup", authMiddleware, resetMatchSetup);
+
+router.get("/:matchId/over-by-over", authMiddleware, getOverByOver);
+
+router.get("/:matchId/bowling-scorecard", authMiddleware, getBowlingScorecard);
+
+router.get("/:matchId/fow", authMiddleware, getFallOfWickets);
+
+router.get("/:matchId/full-scorecard", authMiddleware, getFullScorecard);
 
 router.put(
-  "/:matchId/result",
+  "/:matchId/transfer-scoring",
   authMiddleware,
-  updateMatchResult
-);
-
-router.get(
-  "/:matchId/summary",
-  authMiddleware,
-  getMatchSummary
-);
-
-
-router.get(
-  "/:matchId/bowling-scorecard",
-  authMiddleware,
-  getBowlingScorecard
-);
-
-router.get(
-  "/:matchId/fow",
-  authMiddleware,
-  getFallOfWickets
-);
-
-router.get(
-  "/:matchId/full-scorecard",
-  authMiddleware,
-  getFullScorecard
+  transferScoring,
 );
 
 export default router;

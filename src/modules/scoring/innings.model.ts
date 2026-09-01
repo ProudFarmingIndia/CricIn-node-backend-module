@@ -25,6 +25,35 @@ const inningsSchema = new mongoose.Schema(
       required: true,
     },
 
+    /*
+    |--------------------------------------------------------------------------
+    | Current Players
+    |--------------------------------------------------------------------------
+    |
+    | Who's actually facing/bowling right now - set at creation (opening
+    | pair + opening bowler) and updated by addBall (strike rotation,
+    | incoming batsman on a wicket) and setNextBowler (new over).
+    |
+    */
+
+    currentStrikerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Player",
+      default: null,
+    },
+
+    currentNonStrikerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Player",
+      default: null,
+    },
+
+    currentBowlerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Player",
+      default: null,
+    },
+
     totalRuns: {
       type: Number,
       default: 0,

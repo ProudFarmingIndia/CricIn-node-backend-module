@@ -74,9 +74,9 @@ export const verifyOtpService = async (phone: string, otp: string) => {
 
   user.isVerified = true;
 
-  user.otp = null;
+  user.otp = null as any;
 
-  user.otpExpiry = null;
+  user.otpExpiry = null as any;
 
   user.lastLoginAt = new Date();
 

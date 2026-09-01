@@ -10,6 +10,20 @@ export const getUserProfile = async (userId: string) => {
   return user;
 };
 
+export const updatePushToken = async (userId: string, token: string) => {
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { expoPushToken: token },
+    { new: true },
+  );
+
+  if (!user) {
+    throw new Error("User not found");
+  }
+
+  return user;
+};
+
 export const updateUserProfile = async (
   userId: string,
   payload: {
