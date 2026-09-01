@@ -4,6 +4,9 @@ import Innings from "./innings.model";
 import Match from "../matches/match.model";
 import Player from "../players/player.model";
 import { assertCanEditTeam } from "../teams/team.service";
+import { finalizeMatchFromInnings } from "../matches/match.service";
+import { recomputePlayerStatsForMatch } from "../players/player.stats.service";
+import { recomputeTeamStatsForMatch } from "../teams/team.stats.service";
 
 /*
 |--------------------------------------------------------------------------
@@ -74,6 +77,49 @@ const bowlerIsCredited = (wicketType: any, explicit: any) => {
 | to the number 11, so a wide for a single added eleven runs to the innings.
 */
 
+/*
+|--------------------------------------------------------------------------
+| Things That Are Not Deliveries
+|--------------------------------------------------------------------------
+|
+| Two events reach this module that are NOT balls: a batter retiring, and
+| penalty runs. They both go through addBall on purpose rather than through
+| endpoints of their own, because everything addBall already gets right
+| applies to them unchanged - authorisation, the innings-completed guard,
+| the crease snapshot, the socket emit, and above all UNDO, which restores
+| totals, wickets, both batters and the bowler from the stored row without
+| knowing or caring what kind of row it is.
+|
+| What they must NOT inherit is the delivery arithmetic: neither advances
+| the over, neither is bowled by anyone, and neither rotates the strike.
+|
+| RETIRED (Law 25.4)
+|   retiredHurt - injury or illness. NOT a dismissal: no wicket falls, and
+|                 the batter may come back when the next wicket does. Stored
+|                 with isWicket false, which is also what keeps him in the
+|                 incoming-batter list on the client.
+|   retiredOut  - retired for any other reason and not returning. This IS a
+|                 dismissal and costs a wicket, but no bowler is credited.
+|
+| PENALTY RUNS (Law 41)
+|   Five runs to the batting side for an offence by the fielding side -
+|   illegal fielding, deliberate distraction, damaging the pitch, ball
+|   tampering. They belong to the TEAM: no batter faced them, no bowler
+|   conceded them, and no ball was bowled.
+|
+*/
+
+const normaliseType = (value: any) =>
+  String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z]/g, "");
+
+const RETIREMENT_TYPES = new Set(["retiredhurt", "retiredout", "retired"]);
+
+const PENALTY_EXTRA = "penalty";
+
+const DEFAULT_PENALTY_RUNS = 5;
+
 const toRuns = (value: any) => {
   const n = Number(value);
 
@@ -89,13 +135,36 @@ const canEditTeam = async (team: any, userId: string): Promise<boolean> => {
   }
 };
 
-export const assertCanScore = async (inningsId: string, userId: string) => {
+export const assertCanScore = async (
+  inningsId: string,
+  userId: string,
+
+  /*
+  | allowCompletedMatch exists for undo, and only for undo.
+  |
+  | The server finalises the match on the ball that ends the second innings,
+  | so the moment that ball lands the match is `completed`. A scorer who
+  | mis-tapped that ball then hit Undo and got "Match not live." - the guard
+  | rejected the one action that could put the mistake right, and the match
+  | was frozen on a wrong result with no way back.
+  |
+  | Everything else keeps the old rule: no scoring on a match that is not
+  | live.
+  */
+
+  options?: { allowCompletedMatch?: boolean },
+) => {
   const innings = await Innings.findById(inningsId);
   if (!innings) throw new Error("Innings not found.");
 
   const match = await Match.findById(innings.matchId);
   if (!match) throw new Error("Match not found.");
-  if (match.status !== "live") throw new Error("Match not live.");
+
+  const stateAllowed =
+    match.status === "live" ||
+    (options?.allowCompletedMatch === true && match.status === "completed");
+
+  if (!stateAllowed) throw new Error("Match not live.");
 
   const senderId = match.inviteSenderUserId || match.userId;
   const isInviteSender = senderId && String(senderId) === String(userId);
@@ -122,12 +191,50 @@ export const addBall = async (payload: any, userId: string) => {
   }
 
   const extraType = payload.extraType || null;
-  const isLegalDelivery = !NON_LEGAL_EXTRAS.includes(extraType);
+
+  const wicketTypeKey = normaliseType(payload.wicketType);
+
+  const isRetirement = RETIREMENT_TYPES.has(wicketTypeKey);
+
+  const isRetiredOut = wicketTypeKey === "retiredout";
+
+  const isPenalty = extraType === PENALTY_EXTRA;
+
+  const isDelivery = !isRetirement && !isPenalty;
+
+  /*
+  | A retirement and a penalty are not bowled, so they cannot be legal
+  | deliveries and must not advance the over.
+  */
+
+  const isLegalDelivery = isDelivery && !NON_LEGAL_EXTRAS.includes(extraType);
+
   const pickedRuns = toRuns(payload.runs);
 
-  const teamRuns = NON_LEGAL_EXTRAS.includes(extraType)
-    ? pickedRuns + 1
-    : pickedRuns;
+  /*
+  | A retirement scores nothing. A penalty is a fixed award to the team -
+  | five by the Law, but taken from the payload so a competition playing a
+  | different number is not fought with.
+  */
+
+  const teamRuns = isRetirement
+    ? 0
+    : isPenalty
+      ? pickedRuns || DEFAULT_PENALTY_RUNS
+      : NON_LEGAL_EXTRAS.includes(extraType)
+        ? pickedRuns + 1
+        : pickedRuns;
+
+  /*
+  | Whether a wicket actually falls.
+  |
+  | retiredHurt is the case this exists for: the client sends it through the
+  | dismissal sheet, so `isWicket` arrives true, but no wicket has fallen and
+  | incrementing would end the innings a batter early. retiredOut does cost a
+  | wicket. Everything else is whatever the client said.
+  */
+
+  const countsAsWicket = isRetirement ? isRetiredOut : !!payload.isWicket;
 
   /*
   | What the BATTER scored, as opposed to what the team scored.
@@ -141,7 +248,8 @@ export const addBall = async (payload: any, userId: string) => {
   | instead of each re-deriving it and disagreeing.
   */
 
-  const batsmanRuns = NOT_BATTER_RUNS.includes(extraType) ? 0 : pickedRuns;
+  const batsmanRuns =
+    !isDelivery || NOT_BATTER_RUNS.includes(extraType) ? 0 : pickedRuns;
 
   const priorLegalBalls = innings.balls;
   const overNumber = Math.floor(priorLegalBalls / 6);
@@ -193,7 +301,7 @@ export const addBall = async (payload: any, userId: string) => {
 
   const maxWickets = Math.max(1, (battingSquad.length || 11) - 1);
 
-  if (payload.isWicket && innings.wickets >= maxWickets) {
+  if (countsAsWicket && innings.wickets >= maxWickets) {
     throw new Error("The innings is over - the side is already all out.");
   }
 
@@ -219,12 +327,21 @@ export const addBall = async (payload: any, userId: string) => {
   |
   */
 
-  const [batsmanDoc, bowlerDoc] = await Promise.all([
+  const [batsmanDoc, bowlerDoc, retiringDoc] = await Promise.all([
     payload.batsmanId
       ? Player.findById(payload.batsmanId).select("playerName")
       : null,
     payload.bowlerId
       ? Player.findById(payload.bowlerId).select("playerName")
+      : null,
+
+    /*
+    | A retirement names the batter who LEFT, which is dismissedPlayerId -
+    | the scorer picks which of the two is walking off, and it is often the
+    | non-striker.
+    */
+    isRetirement && payload.dismissedPlayerId
+      ? Player.findById(payload.dismissedPlayerId).select("playerName")
       : null,
   ]);
 
@@ -232,7 +349,30 @@ export const addBall = async (payload: any, userId: string) => {
 
   const bowlerName = bowlerDoc?.playerName || "the bowler";
 
+  const retiringName = retiringDoc?.playerName || "";
+
   const buildCommentary = (data: any) => {
+    /*
+    | Neither of these was bowled, so neither reads "X to Y". They are
+    | announcements, and the commentary should sound like one.
+    */
+
+    if (isRetirement) {
+      const who = retiringName || batsmanName;
+
+      return isRetiredOut
+        ? `${who} retired out`
+        : `${who} retired hurt`;
+    }
+
+    if (isPenalty) {
+      const reason = String(payload.penaltyReason || "").trim();
+
+      return `${teamRuns} penalty runs to the batting side${
+        reason ? ` — ${reason}` : ""
+      }`;
+    }
+
     const opener = `${bowlerName} to ${batsmanName}`;
 
     /*
@@ -294,6 +434,39 @@ export const addBall = async (payload: any, userId: string) => {
 
   const ball = await Scoring.create({
     ...payload,
+
+    /*
+    |--------------------------------------------------------------------------
+    | matchId Comes From The Innings, Not The Client
+    |--------------------------------------------------------------------------
+    |
+    | It used to arrive only in the spread above, and when the client sent it
+    | as undefined every delivery died on:
+    |
+    |     Scoring validation failed: matchId: Path `matchId` is required.
+    |
+    | That is exactly what happened after a scorer came back from the wagon
+    | wheel or the dismissal sheet: those screens return to LiveScoringScreen
+    | with no params, React Navigation 6 REPLACES params rather than merging
+    | them, and matchId was the last thing on that screen still being read
+    | straight out of route.params. Wide, No Ball, Bye, Leg Bye and Wicket all
+    | went through it, so from the second ball onwards the scoring pad looked
+    | alive and recorded nothing.
+    |
+    | The screen has been fixed to hold its own matchId. This is the other
+    | half: the innings ALREADY knows which match it belongs to, so there is
+    | no reason for the server to depend on the client for it. A payload that
+    | forgets matchId - this client, an older build, a retry - can no longer
+    | stall an innings.
+    |
+    | inningsId is pinned the same way. assertCanScore has already resolved
+    | this exact innings; taking its _id rules out a payload that names one
+    | innings in the guard and another in the record.
+    */
+
+    matchId: payload.matchId || innings.matchId,
+    inningsId: innings._id,
+
     over: overNumber,
     ball: ballInOver,
     isLegalDelivery,
@@ -306,15 +479,40 @@ export const addBall = async (payload: any, userId: string) => {
     | the client and are new to the schema, so spelling them out makes it
     | obvious they are meant to persist.
     */
-    shotType: payload.shotType || "",
+    shotType: isDelivery ? payload.shotType || "" : "",
 
     batsmanRuns,
 
+    /*
+    | The stored isWicket is what UNDO reads to decide whether to give a
+    | wicket back, and what the client reads to decide who may bat again.
+    | Both answers are the same one: countsAsWicket.
+    |
+    | A retired-hurt batter therefore stays in the incoming-batter list and
+    | can return at the next fall of a wicket, with no separate resume
+    | workflow anywhere - which is exactly how Law 25.4 works.
+    */
+
+    isWicket: countsAsWicket,
+
     // Derived on the server so a client that forgets the flag cannot hand
     // the bowler a wicket for a run out.
-    bowlerCredit: payload.isWicket
-      ? bowlerIsCredited(payload.wicketType, payload.bowlerCredit)
-      : true,
+    bowlerCredit:
+      isDelivery && payload.isWicket
+        ? bowlerIsCredited(payload.wicketType, payload.bowlerCredit)
+        : !isDelivery
+          ? false
+          : true,
+
+    /*
+    | Nobody bowled a retirement or a penalty, so no bowler owns the row.
+    | Leaving the bowler on it would put a delivery in his over and charge
+    | him five runs he did not concede.
+    */
+
+    bowlerId: isDelivery ? payload.bowlerId || null : null,
+
+    penaltyReason: isPenalty ? payload.penaltyReason || "" : "",
 
     bowlerIdBefore,
 
@@ -371,11 +569,22 @@ export const addBall = async (payload: any, userId: string) => {
     currentNonStrikerId = swap;
   };
 
-  // 1. Runs run.
-  if (pickedRuns % 2 === 1) swapEnds();
+  /*
+  | 1. Runs run.
+  |
+  | Guarded on isDelivery: penalty runs are five - an ODD number - and
+  | without this the batters would change ends for an award nobody ran.
+  */
+  if (isDelivery && pickedRuns % 2 === 1) swapEnds();
 
-  // 2. The dismissed batter is replaced at whichever end he is on.
-  if (payload.isWicket) {
+  /*
+  | 2. The departing batter is replaced at whichever end he is on.
+  |
+  | Retirements come through here too. A retired batter leaves the crease
+  | exactly like a dismissed one - the only difference is whether a wicket
+  | was counted above.
+  */
+  if (countsAsWicket || isRetirement) {
     const dismissedId = String(
       payload.dismissedPlayerId || payload.batsmanId || "",
     );
@@ -409,7 +618,7 @@ export const addBall = async (payload: any, userId: string) => {
     $inc: {
       totalRuns: teamRuns,
       balls: isLegalDelivery ? 1 : 0,
-      wickets: payload.isWicket ? 1 : 0,
+      wickets: countsAsWicket ? 1 : 0,
 
       /*
       | `overs` is declared on the innings and was never written by
@@ -426,7 +635,11 @@ export const addBall = async (payload: any, userId: string) => {
     currentNonStrikerId,
   };
 
-  if (payload.bowlerId) {
+  /*
+  | Not for a penalty or a retirement: nobody bowled, so the bowler at the
+  | end of the over is still whoever it was.
+  */
+  if (payload.bowlerId && isDelivery) {
     updateDoc.currentBowlerId = payload.bowlerId;
   }
 
@@ -473,6 +686,54 @@ export const addBall = async (payload: any, userId: string) => {
 
   const inningsComplete = oversExhausted || allOut || targetReached;
 
+  /*
+  |--------------------------------------------------------------------------
+  | The Server Ends The Innings
+  |--------------------------------------------------------------------------
+  |
+  | This used to be REPORTED and left to the client to act on, and that one
+  | decision is behind most of the ways a match got stuck.
+  |
+  | LiveScoringScreen called endInnings and never checked the result. The
+  | hook resolves { success: false } instead of throwing, so a network blip
+  | on the last ball of the first innings left isCompleted false while the
+  | scorer walked on to the second. From then on the live card resolved
+  | "the innings that is not completed" to the FIRST one - so reopening the
+  | app dropped the scorer back into a finished innings with no target, and
+  | every ball they recorded inflated the first-innings total that decides
+  | whether the chase has been won.
+  |
+  | Ending it here makes the state of the innings a fact about the innings,
+  | not a side effect of a screen that may never run. Undo re-opens it - see
+  | undoLastBall.
+  */
+
+  if (inningsComplete && !innings.isCompleted) {
+    await Innings.findByIdAndUpdate(payload.inningsId, {
+      isCompleted: true,
+      completedAt: new Date(),
+    });
+  }
+
+  /*
+  | And when it was the SECOND innings, the match itself is over. Deciding
+  | that here rather than on the result screen is what makes a tie, a level
+  | all-out, and a scorer who closes the app on the winning run all come out
+  | right - see finalizeMatchFromInnings in match.service.ts.
+  */
+
+  let matchCompleted = false;
+
+  if (inningsComplete && innings.inningsNumber === 2) {
+    try {
+      await finalizeMatchFromInnings(String(innings.matchId));
+      matchCompleted = true;
+    } catch (error: any) {
+      // Never fail the delivery over the result write; it can be retried.
+      console.error("[addBall] finalizeMatchFromInnings failed:", error?.message);
+    }
+  }
+
   const populatedInnings = await Innings.findById(payload.inningsId)
     .populate("currentStrikerId")
     .populate("currentNonStrikerId")
@@ -491,6 +752,10 @@ export const addBall = async (payload: any, userId: string) => {
     targetReached,
     maxWickets,
     totalOvers,
+
+    // The client uses this to go to the result rather than the innings break.
+    matchCompleted,
+    inningsNumber: innings.inningsNumber,
   };
 };
 
@@ -501,7 +766,15 @@ export const addBall = async (payload: any, userId: string) => {
 */
 
 export const undoLastBall = async (inningsId: string, userId: string) => {
-  await assertCanScore(inningsId, userId);
+  /*
+  | Undo is allowed on a match the server has just finalised - see the note
+  | on assertCanScore. Without it, the ball that ends the match is the one
+  | ball that can never be taken back.
+  */
+
+  const match = await assertCanScore(inningsId, userId, {
+    allowCompletedMatch: true,
+  });
 
   /*
   | `_id` breaks the tie.
@@ -560,9 +833,60 @@ export const undoLastBall = async (inningsId: string, userId: string) => {
       ...(lastBall.bowlerIdBefore
         ? { currentBowlerId: lastBall.bowlerIdBefore }
         : {}),
+
+      /*
+      | Undoing the delivery that ENDED the innings re-opens it.
+      |
+      | The server now completes an innings automatically on the last ball,
+      | so without this an undo would leave a closed innings that refuses
+      | every further delivery - and the scorer correcting a mis-tapped
+      | final wicket would have no way back in.
+      */
+      isCompleted: false,
+      completedAt: null,
     },
     { new: true },
   );
+
+  /*
+  |--------------------------------------------------------------------------
+  | Un-finishing A Match
+  |--------------------------------------------------------------------------
+  |
+  | The innings above has just been re-opened. If the ball being undone was
+  | the one that ENDED the match, the match itself is sitting on `completed`
+  | with a result and an end time - and every following delivery would be
+  | refused with "Match not live." while the scoring pad still looked live.
+  |
+  | Putting the match back to live is the only consistent answer: the result
+  | was derived from a ball that no longer exists. finalizeMatchFromInnings
+  | writes it again, from scratch, on whatever ball ends the match next.
+  |
+  | winnerTeam, result and endTime are cleared with it so nothing keeps
+  | showing a verdict for a game that is running again.
+  */
+
+  if (match.status === "completed") {
+    await Match.findByIdAndUpdate(match._id, {
+      status: "live",
+      winnerTeam: null,
+      result: "",
+      endTime: null,
+    });
+
+    /*
+    | The match is live again, so it must stop counting toward anybody's
+    | career figures until it finishes for real. Recomputing rather than
+    | subtracting means this is simply true again, with no arithmetic to get
+    | wrong - the match is no longer in the completed set, so it no longer
+    | contributes.
+    */
+
+    void recomputePlayerStatsForMatch(match._id);
+
+    // The teams' record has to go back too - this match is unfinished again.
+    void recomputeTeamStatsForMatch(match._id);
+  }
 
   // FIX: same as addBall — return a populated innings so the frontend
   // keeps showing player names after an undo.

@@ -48,6 +48,25 @@ const scoringSchema = new mongoose.Schema(
       default: null,
     },
 
+    /*
+    |--------------------------------------------------------------------------
+    | Penalty Reason
+    |--------------------------------------------------------------------------
+    |
+    | Why five runs were awarded - illegal fielding, deliberate distraction,
+    | damaging the pitch, ball tampering, other. Stored because "5 penalty
+    | runs" with no reason is unarguable-with after the fact, and a scorer
+    | being questioned about it needs the note more than the number.
+    |
+    | Empty on every row that is not a penalty.
+    */
+
+    penaltyReason: {
+      type: String,
+      default: "",
+      trim: true,
+    },
+
     dismissedPlayerId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Player",

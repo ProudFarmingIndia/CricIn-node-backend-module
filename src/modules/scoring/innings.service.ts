@@ -77,6 +77,44 @@ export const createInnings = async (payload: any, userId?: string) => {
   });
 
   if (existing) {
+    /*
+    | An innings that exists but has NOT been bowled at yet is still just a
+    | lineup, and the lineup belongs to whoever is starting now.
+    |
+    | This used to return the stored innings untouched, which quietly threw
+    | away the incoming openers. The case is easy to hit: one captain sets
+    | the lineup, mistypes the PIN (the innings is created before the PIN is
+    | checked), and gives up. The other captain then picks their OWN
+    | striker, non-striker and opening bowler, enters the correct PIN - and
+    | starts scoring with the first captain's three players, with nothing on
+    | screen to say why.
+    |
+    | Once a ball has been bowled the innings is history, not a lineup, and
+    | is returned exactly as it stands.
+    */
+
+    if ((existing.balls || 0) === 0) {
+      const openers: any = {};
+
+      if (payload.currentStrikerId) {
+        openers.currentStrikerId = payload.currentStrikerId;
+      }
+
+      if (payload.currentNonStrikerId) {
+        openers.currentNonStrikerId = payload.currentNonStrikerId;
+      }
+
+      if (payload.currentBowlerId) {
+        openers.currentBowlerId = payload.currentBowlerId;
+      }
+
+      if (Object.keys(openers).length > 0) {
+        return await Innings.findByIdAndUpdate(existing._id, openers, {
+          new: true,
+        });
+      }
+    }
+
     return existing;
   }
 

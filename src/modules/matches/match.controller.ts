@@ -129,20 +129,24 @@ export const deleteMatch = async (req: AuthRequest, res: Response) => {
 export const startMatch = async (req: AuthRequest, res: Response) => {
   try {
     /*
-    | `pin` is the single-PIN case a captain sends (the opponent's).
-    | `pins` is { teamA, teamB } for a neutral scorer, who owes one PIN per
-    | team. The service decides which of the two it needs from who is
-    | asking - the client cannot talk its way past the gate by sending the
-    | wrong shape.
+    | `pins` was never forwarded. The two-PIN case - a neutral Quick Score
+    | scorer who manages neither team and must supply a PIN from each
+    | captain - therefore arrived at the gate with both PINs undefined and
+    | could never start a match.
+    |
+    | `setup` carries the squads and the toss so they are written in the
+    | same call that validates the PIN, rather than saved screen by screen
+    | on the way here.
     */
 
-    const { pin, pins } = req.body || {};
+    const { pin, pins, setup } = req.body || {};
 
     const match = await MatchService.startMatch(
       req.user.userId,
       req.params.matchId as string,
       pin,
       pins,
+      setup,
     );
 
     res.status(200).json({
@@ -200,15 +204,13 @@ export const completeMatch = async (req: AuthRequest, res: Response) => {
 
 export const updateMatchResult = async (req: AuthRequest, res: Response) => {
   try {
-    // playerOfTheMatch is optional - plenty of matches never name one.
-    const { winnerTeam, result, playerOfTheMatch } = req.body;
+    const { winnerTeam, result } = req.body;
 
     const match = await MatchService.updateMatchResult(
       req.user.userId,
       req.params.matchId as string,
       winnerTeam,
       result,
-      playerOfTheMatch,
     );
 
     res.status(200).json({

@@ -450,7 +450,18 @@ export const markAsRead = async (
     { _id: notificationId, receiverId },
     { isRead: true },
     { new: true },
-  );
+  ).populate("actorId", "fullName profileImage");
+
+  /*
+  | Populated to match the shape getNotifications returns.
+  |
+  | This came back as a bare document, and the client wrote it straight over
+  | the row in its list - so reading a notification replaced a row that knew
+  | who sent it with one holding a raw actor id, and the sender's name and
+  | avatar disappeared from the card. The client merges defensively now, but
+  | returning the same shape the list uses is the actual fix: a read and a
+  | list row should not be two different objects.
+  */
 
   if (!notification) {
     throw new Error("Notification not found.");

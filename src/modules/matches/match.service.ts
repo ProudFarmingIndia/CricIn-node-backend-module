@@ -7,6 +7,8 @@ import Player from "../players/player.model";
 import mongoose from "mongoose";
 
 import { assertCanEditTeam } from "../teams/team.service";
+import { recomputePlayerStatsForMatch } from "../players/player.stats.service";
+import { recomputeTeamStatsForMatch } from "../teams/team.stats.service";
 
 import {
   sendMatchConfirmationRequiredNotification,
@@ -39,6 +41,35 @@ const canEditTeam = async (team: any, userId: string): Promise<boolean> => {
   } catch {
     return false;
   }
+};
+
+/*
+|--------------------------------------------------------------------------
+| Is This User The Scorer?
+|--------------------------------------------------------------------------
+|
+| The one rule, in one place, so the match feed and the match details
+| screen cannot disagree about who sees a SCORE NOW button.
+|
+| It mirrors assertCanScore exactly: the stored scorer owns it, and the
+| invite-sender fallback applies only to matches that went live before
+| scorerUserId was being recorded.
+|
+| Sent to the client as `isScorer` so no screen has to re-derive it from
+| three id fields and get it subtly wrong - which is what every one of
+| them was doing.
+*/
+
+const isMatchScorer = (match: any, userId?: string): boolean => {
+  if (!userId) return false;
+
+  if (match?.scorerUserId) {
+    return String(match.scorerUserId) === String(userId);
+  }
+
+  const senderId = match?.inviteSenderUserId || match?.userId;
+
+  return !!senderId && String(senderId) === String(userId);
 };
 
 const canManageTeam = async (team: any, userId: string): Promise<boolean> => {
@@ -107,7 +138,13 @@ export const getMatchById = async (matchId: string, userId?: string) => {
     const managesTeamB = await canEditTeam(match.teamB, userId);
     canManage = managesTeamA || managesTeamB;
 
-    if (canManage) {
+    /*
+    | Only while the match is still waiting to start. Once it is live,
+    | completed or cancelled the PIN is spent (startMatch nulls both), and
+    | this also hides the PIN on matches that went live before that change.
+    */
+
+    if (canManage && match.status === "upcoming") {
       matchPin = managesTeamA ? match.teamAPin : match.teamBPin;
     }
 
@@ -117,12 +154,30 @@ export const getMatchById = async (matchId: string, userId?: string) => {
     );
   }
 
-  const obj = match.toObject();
+  /*
+  | Both raw PINs used to ride out on every response inside this spread.
+  | Anyone who could open the match - including the opposing captain, who is
+  | the exact person the PIN is meant to prove something to - could read the
+  | other side's PIN out of the payload and start the match without ever
+  | asking for it.
+  |
+  | `matchPin` above is the only PIN that leaves the server, and it is that
+  | user's OWN side's PIN, only before the match starts.
+  */
+
+  const { teamAPin: _a, teamBPin: _b, ...obj } = match.toObject() as any;
+
   return {
     ...obj,
     canManage,
     matchPin,
     isInviteSender,
+
+    /*
+    | Whether THIS user is the one scoring. Drives the SCORE NOW button;
+    | canManage drives Start Match, because either captain may start.
+    */
+    isScorer: isMatchScorer(match, userId),
   };
 };
 
@@ -267,6 +322,28 @@ export const startMatch = async (
   matchId: string,
   pin?: string,
   pins?: { teamA?: string; teamB?: string },
+
+  /*
+  | The whole match setup - both playing XIs and the toss - applied HERE,
+  | in the same write that takes the match live, and only after the PIN
+  | has been accepted.
+  |
+  | The three setup screens used to save as they went: Squad Selection
+  | wrote both squads, Toss wrote the result, each on its own request and
+  | each before any PIN existed. So a captain who set everything up and
+  | then mistyped the PIN left their squads and their toss on the match
+  | anyway - and the opposing captain, starting fresh later, was handed
+  | somebody else's abandoned setup with no way to tell.
+  |
+  | Passing it through the PIN gate makes the whole thing one decision:
+  | either the match starts with this setup, or nothing was written at all.
+  */
+  setup?: {
+    teamASquad?: string[];
+    teamBSquad?: string[];
+    tossWinner?: string;
+    tossDecision?: string;
+  },
 ) => {
   const match = await Match.findById(matchId)
     .populate("teamA")
@@ -365,11 +442,76 @@ export const startMatch = async (
     }
   }
 
-  const started = await Match.findByIdAndUpdate(
-    matchId,
-    { status: "live", startTime: new Date() },
-    { new: true },
-  );
+  /*
+  |--------------------------------------------------------------------------
+  | Who Is Scoring This Match
+  |--------------------------------------------------------------------------
+  |
+  | Whoever starts it. This was never recorded, and everything downstream
+  | went wrong because of it.
+  |
+  | scorerUserId stayed null through every start, so assertCanScore fell
+  | back to "the captain who sent the invite" - which is backwards in the
+  | common case. If the ACCEPTING captain started the match, they could not
+  | record a single ball ("Only the captain who sent the match invite can
+  | score"), while the captain who sent the invite and did nothing could.
+  |
+  | It also left both captains looking at a SCORE NOW button for a match
+  | only one of them is actually scoring.
+  |
+  | Set once, on the transition to live: the first captain to get through
+  | the PIN gate owns the scoring. It is not overwritten if it is already
+  | set - a scoring request approved in the Quick Score flow names its
+  | scorer up front, and transferScoring hands it to somebody else later.
+  */
+
+  const update: any = { status: "live", startTime: new Date() };
+
+  if (!match.scorerUserId) {
+    update.scorerUserId = userId;
+  }
+
+  /*
+  |--------------------------------------------------------------------------
+  | The PINs Are Spent
+  |--------------------------------------------------------------------------
+  |
+  | A PIN exists to answer one question, once: "are both captains here and
+  | do they agree to start?" The moment the match is live that question has
+  | been answered and the PIN has no job left - the early return above means
+  | it can never gate a second start of this match.
+  |
+  | Leaving them stored meant both captains kept staring at a Match PIN card
+  | on the match screen, a PIN chip on the home feed and a PIN in their
+  | notifications for a game already being scored. It reads like something
+  | still to be done, and it is a live secret sitting in the UI and in the
+  | database for no reason.
+  |
+  | Cleared for BOTH sides, not just the starter's: they are two halves of
+  | the same gate and the gate is now open.
+  |
+  | getMatchById and the list builders also stop returning matchPin once a
+  | match leaves `upcoming`, which covers matches that went live before this
+  | change and still have their PINs on the document.
+  */
+
+  update.teamAPin = null;
+  update.teamBPin = null;
+
+  /*
+  | The setup joins the same update, so it lands atomically with the status.
+  | Each field is applied only if it was actually sent - a caller that
+  | already saved the setup some other way is not forced to resend it.
+  */
+
+  if (setup?.teamASquad?.length) update.teamASquad = setup.teamASquad;
+  if (setup?.teamBSquad?.length) update.teamBSquad = setup.teamBSquad;
+  if (setup?.tossWinner) update.tossWinner = setup.tossWinner;
+  if (setup?.tossDecision) update.tossDecision = setup.tossDecision;
+
+  const started = await Match.findByIdAndUpdate(matchId, update, {
+    new: true,
+  });
 
   /*
   | Tell everyone following either team that the match is live.
@@ -385,6 +527,355 @@ export const startMatch = async (
   void notifyFollowersMatchLive(started);
 
   return started;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Finalize A Match From Its Innings
+|--------------------------------------------------------------------------
+|
+| Called by addBall the moment the second innings ends. The result was
+| previously worked out on MatchResultScreen and written from there, which
+| left four holes:
+|
+|   A TIE WAS NEVER SAVED. The screen printed "Match tied" and skipped the
+|   write entirely, because it guarded on having a winner. The match stayed
+|   `live` forever, sitting in the live feed and never reaching Recent.
+|
+|   A TRANSFERRED SCORER COULD NOT SAVE IT. updateMatchResult authorises on
+|   captaincy, but scoring can be handed to any squad player. Their write
+|   was rejected 400 and the screen only console.error'd it - so the scorer
+|   saw a result that had not been recorded.
+|
+|   THE MARGIN ASSUMED ELEVEN A SIDE. It read `10 - wickets`, so an
+|   eight-a-side match reported the wrong margin and fanned that out to
+|   every follower.
+|
+|   CLOSING THE APP ON THE WINNING RUN LOST THE RESULT, because the only
+|   writer was a screen that had not been reached yet.
+|
+| Deciding it here, from the innings themselves, fixes all four at once.
+| It is idempotent: a match already completed is returned untouched.
+|
+*/
+
+/*
+|--------------------------------------------------------------------------
+| Player Of The Match
+|--------------------------------------------------------------------------
+|
+| There is no Law for this award - it is an adjudicator's judgment, which is
+| why no cricket rulebook defines it. What follows is therefore a stated
+| policy, not a rule, and it is written out so that a scorer who disagrees
+| with a pick can at least see the reasoning rather than guess at it.
+|
+| The policy: an impact score per player, built only from what actually
+| happened on the field, and the highest wins.
+|
+|   BATTING   1 per run, plus 1 per four and 2 per six on top - a boundary
+|             is worth more than the same runs nudged around. A strike-rate
+|             bonus applies only from 10 balls, because a 12-ball 20 is not
+|             evidence of anything.
+|
+|   BOWLING   25 per wicket - a wicket is the most valuable single act in
+|             cricket and the weights say so - plus an economy bonus per
+|             over below six an over, and 8 per maiden.
+|
+|   FIELDING  8 for a catch, a stumping or a run-out. Small, because the
+|             data cannot tell a regulation catch from a blinder, and
+|             over-weighting it would hand the award to a busy keeper.
+|
+|   WINNING   The whole score is multiplied by 1.25 for the winning side.
+|             Almost every real award goes to a winner, and a losing
+|             centurion beating a winning all-rounder reads as wrong to
+|             everyone watching. Not applied to a tie.
+|
+| Ties in the score break on wickets, then runs, then player id, so the
+| same match always produces the same answer.
+|
+| The returned `line` is the stat line the award card shows - "82 (41) &
+| 2/24". A name with no numbers under it invites exactly the argument the
+| card is meant to settle.
+|
+*/
+
+const computePlayerOfTheMatch = async (
+  matchId: string,
+  winnerTeam: any,
+): Promise<{ playerId: any; line: string } | null> => {
+  const balls = await Scoring.find({ matchId }).lean();
+
+  if (balls.length === 0) return null;
+
+  const innings = await Innings.find({ matchId }).lean();
+
+  const battingTeamByInnings = new Map(
+    innings.map((i: any) => [String(i._id), String(i.battingTeam)]),
+  );
+
+  type Row = {
+    runs: number;
+    ballsFaced: number;
+    fours: number;
+    sixes: number;
+    wickets: number;
+    runsConceded: number;
+    ballsBowled: number;
+    catches: number;
+    teamId: string;
+  };
+
+  const rows = new Map<string, Row>();
+
+  const row = (id: any, teamId: string): Row => {
+    const key = String(id);
+
+    if (!rows.has(key)) {
+      rows.set(key, {
+        runs: 0,
+        ballsFaced: 0,
+        fours: 0,
+        sixes: 0,
+        wickets: 0,
+        runsConceded: 0,
+        ballsBowled: 0,
+        catches: 0,
+        teamId,
+      });
+    }
+
+    const found = rows.get(key)!;
+
+    // The first team seen wins; a player only ever plays for one side here.
+    if (!found.teamId && teamId) found.teamId = teamId;
+
+    return found;
+  };
+
+  for (const ball of balls as any[]) {
+    const battingTeam = battingTeamByInnings.get(String(ball.inningsId)) || "";
+
+    const bowlingTeam =
+      innings.find((i: any) => String(i._id) === String(ball.inningsId))
+        ?.bowlingTeam || "";
+
+    // ── Batting ──────────────────────────────────────────────────────
+    if (ball.batsmanId) {
+      const r = row(ball.batsmanId, battingTeam);
+
+      r.runs += ball.batsmanRuns ?? 0;
+
+      /*
+      | Balls faced excludes wides, and excludes the rows that are not
+      | deliveries at all - a retirement and a penalty are recorded with
+      | no batsmanId, so they never reach here in the first place.
+      */
+      if (ball.extraType !== "wide" && ball.isLegalDelivery !== false) {
+        r.ballsFaced += 1;
+      }
+
+      if ((ball.batsmanRuns ?? 0) === 4) r.fours += 1;
+      if ((ball.batsmanRuns ?? 0) === 6) r.sixes += 1;
+    }
+
+    // ── Bowling ──────────────────────────────────────────────────────
+    if (ball.bowlerId) {
+      const r = row(ball.bowlerId, String(bowlingTeam));
+
+      if (ball.isLegalDelivery !== false) r.ballsBowled += 1;
+
+      r.runsConceded += ball.teamRuns ?? 0;
+
+      if (ball.isWicket && ball.bowlerCredit !== false) r.wickets += 1;
+    }
+
+    // ── Fielding ─────────────────────────────────────────────────────
+    if (ball.isWicket && ball.fielderId) {
+      row(ball.fielderId, String(bowlingTeam)).catches += 1;
+    }
+  }
+
+  let best: { playerId: any; line: string; score: number; r: Row } | null =
+    null;
+
+  for (const [playerId, r] of rows) {
+    let score = r.runs + r.fours + r.sixes * 2;
+
+    if (r.ballsFaced >= 10) {
+      const strikeRate = (r.runs / r.ballsFaced) * 100;
+      score += (strikeRate - 100) / 5;
+    }
+
+    score += r.wickets * 25;
+
+    if (r.ballsBowled >= 6) {
+      const economy = (r.runsConceded / r.ballsBowled) * 6;
+      score += Math.max(0, 6 - economy) * (r.ballsBowled / 6);
+    }
+
+    score += r.catches * 8;
+
+    if (winnerTeam && r.teamId && r.teamId === String(winnerTeam)) {
+      score *= 1.25;
+    }
+
+    const batLine =
+      r.ballsFaced > 0 ? `${r.runs} (${r.ballsFaced})` : "";
+
+    const bowlLine =
+      r.ballsBowled > 0
+        ? `${r.wickets}/${r.runsConceded} (${Math.floor(r.ballsBowled / 6)}.${
+            r.ballsBowled % 6
+          })`
+        : "";
+
+    const line = [batLine, bowlLine].filter(Boolean).join(" & ");
+
+    const better =
+      !best ||
+      score > best.score ||
+      (score === best.score && r.wickets > best.r.wickets) ||
+      (score === best.score &&
+        r.wickets === best.r.wickets &&
+        r.runs > best.r.runs) ||
+      (score === best.score &&
+        r.wickets === best.r.wickets &&
+        r.runs === best.r.runs &&
+        String(playerId) < String(best.playerId));
+
+    if (better) best = { playerId, line, score, r };
+  }
+
+  // A player who did nothing measurable is not an award winner.
+  if (!best || best.score <= 0 || !best.line) return null;
+
+  return { playerId: best.playerId, line: best.line };
+};
+
+export const finalizeMatchFromInnings = async (matchId: string) => {
+  const match = await Match.findById(matchId).populate("teamA").populate("teamB");
+
+  if (!match) throw new Error("Match not found.");
+
+  if (match.status === "completed") return match;
+
+  const innings = await Innings.find({ matchId }).sort({ inningsNumber: 1 });
+
+  const first = innings.find((i: any) => i.inningsNumber === 1);
+  const second = innings.find((i: any) => i.inningsNumber === 2);
+
+  if (!first || !second) {
+    throw new Error("Both innings are required to complete a match.");
+  }
+
+  const firstRuns = first.totalRuns || 0;
+  const secondRuns = second.totalRuns || 0;
+
+  const battingTeamOf = (inn: any) => String(inn.battingTeam);
+
+  const chasingTeamId = battingTeamOf(second);
+  const defendingTeamId = battingTeamOf(first);
+
+  const teamName = (id: string) =>
+    String((match.teamA as any)?._id) === String(id)
+      ? (match.teamA as any)?.teamName || "Team A"
+      : (match.teamB as any)?.teamName || "Team B";
+
+  /*
+  | Wickets in hand uses the CHASING side's actual squad, not a hard-coded
+  | ten. An eight-a-side match has seven wickets to give.
+  */
+
+  const chasingSquad =
+    String((match.teamA as any)?._id) === String(chasingTeamId)
+      ? match.teamASquad || []
+      : match.teamBSquad || [];
+
+  const maxWickets = Math.max(1, (chasingSquad.length || 11) - 1);
+
+  const wicketsInHand = Math.max(0, maxWickets - (second.wickets || 0));
+
+  let winnerTeam: string | null = null;
+  let result: string;
+
+  if (secondRuns > firstRuns) {
+    winnerTeam = chasingTeamId;
+    result = `${teamName(chasingTeamId)} won by ${wicketsInHand} wicket${
+      wicketsInHand === 1 ? "" : "s"
+    }`;
+  } else if (firstRuns > secondRuns) {
+    winnerTeam = defendingTeamId;
+
+    const margin = firstRuns - secondRuns;
+
+    result = `${teamName(defendingTeamId)} won by ${margin} run${
+      margin === 1 ? "" : "s"
+    }`;
+  } else {
+    // A tie is a real result, and it is recorded like one.
+    result = "Match tied";
+  }
+
+  const update: any = {
+    status: "completed",
+    endTime: new Date(),
+    result,
+  };
+
+  if (winnerTeam) update.winnerTeam = winnerTeam;
+
+  /*
+  | The award is decided here, in the same write that decides the result,
+  | because it depends on who won - and because a match that finishes
+  | without one leaves an empty card on the Live tab forever. Nothing wrote
+  | playerOfTheMatch before this; the field and its card both existed and
+  | waited on a value that never came.
+  */
+
+  const award = await computePlayerOfTheMatch(matchId, winnerTeam);
+
+  if (award) {
+    update.playerOfTheMatch = award.playerId;
+    update.playerOfTheMatchStats = award.line;
+  }
+
+  const completed = await Match.findByIdAndUpdate(matchId, update, {
+    new: true,
+  });
+
+  // Both innings are closed, so nothing can be scored into a finished match.
+  await Innings.updateMany(
+    { matchId, isCompleted: { $ne: true } },
+    { isCompleted: true, completedAt: new Date() },
+  );
+
+  /*
+  |--------------------------------------------------------------------------
+  | Career Statistics
+  |--------------------------------------------------------------------------
+  |
+  | The one moment a completed match is allowed to move anybody's profile
+  | figures. Nothing during the match touches them, which is the whole rule:
+  | Player.stats only ever reflects matches that have finished.
+  |
+  | Recomputed from ball data rather than added to, because this function can
+  | run twice on the same match - undoing the ball that ended it reopens the
+  | match, and the next ball finalises it again. An incremental update would
+  | count that match twice with no way to tell afterwards.
+  |
+  | Not awaited, and it cannot throw: the result is what matters here, and a
+  | statistics write must never be able to stop a match being marked
+  | completed. If it fails, the next profile read recomputes anyway.
+  */
+
+  void recomputePlayerStatsForMatch(matchId);
+
+  // Played / won / lost / drawn, on the same rule and at the same moment.
+  void recomputeTeamStatsForMatch(matchId);
+
+  void notifyFollowersMatchResult(completed, String(match.userId || ""));
+
+  return completed;
 };
 
 /*
@@ -426,14 +917,55 @@ export const verifyMatchPin = async (
 |--------------------------------------------------------------------------
 */
 
-export const completeMatch = async (userId: string, matchId: string) => {
-  await assertIsMatchOwner(matchId, userId);
+/*
+| Finish a match, working the result out from its innings.
+|
+| Two things changed here.
+|
+| AUTHORISATION. It required the match OWNER. But scoring can be handed to
+| any squad player, and it is that person who is standing there when the
+| last ball is bowled - so the one person most likely to need this was the
+| one refused. The scorer and either captain are now accepted.
+|
+| WHAT IT DOES. It used to flip the status and nothing else, leaving
+| `result` empty and `winnerTeam` unset. It now goes through
+| finalizeMatchFromInnings, so a match completed this way is indistinguish-
+| able from one completed automatically on the winning run.
+*/
 
-  return await Match.findByIdAndUpdate(
-    matchId,
-    { status: "completed", endTime: new Date() },
-    { new: true },
-  );
+export const completeMatch = async (userId: string, matchId: string) => {
+  const match = await Match.findById(matchId)
+    .populate("teamA")
+    .populate("teamB");
+
+  if (!match) {
+    throw new Error("Match not found.");
+  }
+
+  const allowed =
+    isMatchScorer(match, userId) ||
+    String(match.userId) === String(userId) ||
+    (await canEditTeam(match.teamA, userId)) ||
+    (await canEditTeam(match.teamB, userId));
+
+  if (!allowed) {
+    throw new Error("You are not authorized to complete this match.");
+  }
+
+  try {
+    return await finalizeMatchFromInnings(matchId);
+  } catch {
+    /*
+    | Both innings are needed to derive a result. Without them - an
+    | abandoned match, say - the status still moves, but no result is
+    | invented.
+    */
+    return await Match.findByIdAndUpdate(
+      matchId,
+      { status: "completed", endTime: new Date() },
+      { new: true },
+    );
+  }
 };
 
 /*
@@ -510,6 +1042,21 @@ export const updateMatchResult = async (
   if (!alreadyCompleted) {
     void notifyFollowersMatchResult(updated, userId);
   }
+
+  /*
+  | This is the OTHER way a match reaches "completed" - a captain saving the
+  | result by hand rather than the second innings ending. Career figures have
+  | to move here too, or a match completed this way would never appear in
+  | anybody's profile.
+  |
+  | Also correct on an edit of an already-completed match: recomputing is
+  | idempotent, so re-saving a result does not double anything.
+  */
+
+  void recomputePlayerStatsForMatch(matchId);
+
+  // Played / won / lost / drawn, on the same rule and at the same moment.
+  void recomputeTeamStatsForMatch(matchId);
 
   /*
   | The award fans out the first time it is set - including when it is
@@ -877,7 +1424,7 @@ const getManagedTeamIds = async (userId: string): Promise<string[]> => {
   return teams.map((team) => String(team._id));
 };
 
-const attachCurrentInnings = async (matches: any[]) => {
+const attachCurrentInnings = async (matches: any[], viewerId?: string) => {
   if (matches.length === 0) {
     return [];
   }
@@ -899,6 +1446,23 @@ const attachCurrentInnings = async (matches: any[]) => {
     const inns = inningsByMatchId.get(String(match._id)) || [];
     const active = inns.find((i) => !i.isCompleted);
     const first = inns.find((i) => i.inningsNumber === 1);
+    const second = inns.find((i) => i.inningsNumber === 2);
+
+    /*
+    | THE INNINGS BREAK.
+    |
+    | currentInnings is "the innings that is not finished", which between
+    | innings is nothing at all. So the moment the first innings ended, every
+    | card that could open the scoring screen passed inningsId: undefined -
+    | and a scorer who closed the app at the break had no route back to it
+    | from anywhere in the app. The match simply could not proceed.
+    |
+    | Saying so explicitly lets the client send them to the innings break
+    | instead of to a scoring pad that cannot record anything.
+    */
+
+    const awaitingSecondInnings =
+      match.status === "live" && !active && !!first && !second;
 
     const target =
       active && active.inningsNumber === 2 && first
@@ -914,8 +1478,107 @@ const attachCurrentInnings = async (matches: any[]) => {
       bowlingSquad = isTeamABatting ? match.teamBSquad || [] : match.teamASquad || [];
     }
 
+    // Raw PINs never leave the server - see getMatchById.
+    const { teamAPin: _a, teamBPin: _b, ...plain } = match.toObject() as any;
+
     return {
-      ...match.toObject(),
+      ...plain,
+
+      // Same flag the details screen gets - see isMatchScorer.
+      isScorer: isMatchScorer(match, viewerId),
+
+      awaitingSecondInnings,
+
+      /*
+      | The finished first innings, so the client can reopen the break with
+      | its squads and the target already known.
+      */
+      completedInnings: awaitingSecondInnings && first
+        ? {
+            inningsId: first._id,
+            inningsNumber: 1,
+            runs: first.totalRuns,
+            wickets: first.wickets,
+            battingTeamId: first.battingTeam,
+            bowlingTeamId: first.bowlingTeam,
+            target: (first.totalRuns || 0) + 1,
+          }
+        : null,
+
+      /*
+      |--------------------------------------------------------------------
+      | The First Innings - Always, Not Only During The Break
+      |--------------------------------------------------------------------
+      |
+      | `completedInnings` above is deliberately null once the chase begins:
+      | it exists to route a scorer INTO the innings break, and a break that
+      | is over is not a destination.
+      |
+      | But the first innings' score is still the most important number on a
+      | second-innings card. Without it the live card read:
+      |
+      |     National Capital Region     (nothing at all)
+      |     Ajay choudhary Team         15/0   1.0 ov
+      |     Needs 342 more to win
+      |
+      | The side being chased had no score against its name, so the card
+      | showed a target with nothing to explain where it came from - and the
+      | team that had just batted looked like it had not batted at all.
+      |
+      | This is a separate field rather than a widened `completedInnings`
+      | precisely so that routing meaning stays untouched: LiveScoringScreen
+      | reads `awaitingSecondInnings && completedInnings` to decide whether
+      | to send the scorer to the innings break, and must keep getting null
+      | once the chase is under way.
+      |
+      | `isCompleted` travels with it because a first innings that is still
+      | being bowled is the live one - the client shows it as the current
+      | score, not as a finished total.
+      */
+
+      firstInnings: first
+        ? {
+            inningsId: first._id,
+            inningsNumber: 1,
+            runs: first.totalRuns,
+            wickets: first.wickets,
+            overs: `${Math.floor(first.balls / 6)}.${first.balls % 6}`,
+            battingTeamId: first.battingTeam,
+            bowlingTeamId: first.bowlingTeam,
+            isCompleted: !!first.isCompleted,
+          }
+        : null,
+
+      /*
+      |--------------------------------------------------------------------
+      | Every Innings, For A Finished Match
+      |--------------------------------------------------------------------
+      |
+      | A recent-result card showed two team names, a tick beside the
+      | winner and a line of prose - "Nav Chetna society won by 6 wickets" -
+      | and no scores at all. The one thing a cricket follower looks for on
+      | a finished match, the two totals, was the one thing missing.
+      |
+      | firstInnings above answers a different question (what is being
+      | chased, right now). This answers "how did the game go", so it
+      | carries both sides in innings order and does not care which is
+      | live.
+      */
+
+      inningsSummaries: inns
+        .slice()
+        .sort((a: any, b: any) => a.inningsNumber - b.inningsNumber)
+        .map((i: any) => ({
+          inningsId: i._id,
+          inningsNumber: i.inningsNumber,
+          runs: i.totalRuns,
+          wickets: i.wickets,
+          overs: `${Math.floor(i.balls / 6)}.${i.balls % 6}`,
+          battingTeamId: i.battingTeam,
+          bowlingTeamId: i.bowlingTeam,
+          isCompleted: !!i.isCompleted,
+        })),
+
       currentInnings: active
         ? {
             inningsId: active._id,
@@ -961,7 +1624,8 @@ export const getLiveMatches = async (userId: string) => {
     .populate("teamBSquad", "playerName playerType")
     .sort({ startTime: -1 });
 
-  return await attachCurrentInnings(matches);
+  // viewerId, so each live card knows whether THIS user is its scorer.
+  return await attachCurrentInnings(matches, userId);
 };
 
 export const getUpcomingMatches = async (userId: string) => {
@@ -987,17 +1651,22 @@ export const getUpcomingMatches = async (userId: string) => {
       String(match.inviteSenderUserId) === String(userId)
     );
 
-    const obj = match.toObject();
+    // Raw PINs never leave the server - see getMatchById.
+    const obj = match.toObject() as any;
+    const { teamAPin: _a, teamBPin: _b, ...plain } = obj;
 
     result.push({
-      ...obj,
+      ...plain,
       canManage,
       isInviteSender,
-      matchPin: canManage
-        ? managesTeamA
-          ? obj.teamAPin
-          : obj.teamBPin
-        : undefined,
+      isScorer: isMatchScorer(match, userId),
+      // Same rule as getMatchById: a PIN is only shown before the start.
+      matchPin:
+        canManage && obj.status === "upcoming"
+          ? managesTeamA
+            ? obj.teamAPin
+            : obj.teamBPin
+          : undefined,
     });
   }
 
@@ -1009,15 +1678,26 @@ export const getRecentMatches = async (userId: string, limit: number) => {
 
   const cappedLimit = Math.min(Math.max(limit || 20, 1), 50);
 
-  return await Match.find({
+  const matches = await Match.find({
     status: "completed",
     $or: [{ teamA: { $in: teamIds } }, { teamB: { $in: teamIds } }],
   })
     .populate("teamA")
     .populate("teamB")
     .populate("winnerTeam")
+    // So a recent card can name the award winner without a second request.
+    .populate("playerOfTheMatch", "playerName profileImage playerType")
     .sort({ endTime: -1 })
     .limit(cappedLimit);
+
+  /*
+  | Routed through attachCurrentInnings, which the live and upcoming feeds
+  | already use. It is what puts `inningsSummaries` on the payload, and it
+  | is why a recent card can now print both totals instead of two bare team
+  | names and a sentence.
+  */
+
+  return await attachCurrentInnings(matches, userId);
 };
 
 /*

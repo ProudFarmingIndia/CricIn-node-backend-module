@@ -4,6 +4,12 @@ import Team from "./team.model";
 import Player from "../players/player.model";
 import TeamBlockedDate from "./teamBlockedDate.model";
 import TeamInvitation from "../teamInvitations/invitation.model";
+
+import {
+  computeTeamStats,
+  withTeamRecord,
+  withTeamRecords,
+} from "./team.stats.service";
 import ViceCaptainProposal from "../viceCaptain/viceCaptainProposal.model";
 import TeamReview from "../teamReviews/teamReview.model";
 import MatchChallenge from "../matchChallenges/matchChallenge.model";
@@ -250,7 +256,7 @@ export const getMyTeams = async (userId: string) => {
   |--------------------------------------------------------------------------
   */
 
-  return await Team.find({
+  const teams = await Team.find({
     $or: query,
   })
     .populate({
@@ -274,6 +280,14 @@ export const getMyTeams = async (userId: string) => {
     .sort({
       createdAt: -1,
     });
+
+  /*
+  | Played / won / lost / drawn, attached fresh - see team.stats.service.
+  | The stored fields were never written by anything, so every team card in
+  | the app showed a blank record.
+  */
+
+  return await withTeamRecords(teams);
 };
 
 /*
@@ -283,13 +297,15 @@ export const getMyTeams = async (userId: string) => {
 */
 
 export const getAllTeams = async () => {
-  return await Team.find()
+  const teams = await Team.find()
     .populate("captainId")
     .populate("viceCaptainId")
     .populate("players")
     .sort({
       createdAt: -1,
     });
+
+  return await withTeamRecords(teams);
 };
 
 /*
@@ -308,7 +324,7 @@ export const getTeamById = async (teamId: string) => {
     throw new Error("Team not found.");
   }
 
-  return team;
+  return await withTeamRecord(team);
 };
 
 /*
@@ -830,12 +846,24 @@ export const updateTeamStats = async (teamId: string) => {
     throw new Error("Team not found.");
   }
 
-  const total = team.totalMatches;
+  /*
+  | This used to read `team.wins / team.totalMatches` and save the result.
+  | Both fields were permanently zero because nothing ever wrote to them, so
+  | it faithfully computed 0% and stored it - a function that appeared to
+  | maintain a team's record while guaranteeing it stayed empty.
+  |
+  | It now derives the whole record from completed matches, which is the same
+  | rule the team leaderboard in stats.service.ts already used.
+  */
 
-  team.winPercentage =
-    total === 0 ? 0 : Number(((team.wins / total) * 100).toFixed(2));
+  const stats = await computeTeamStats([teamId]);
 
-  await team.save();
+  const record = stats.get(String(teamId));
+
+  if (record) {
+    Object.assign(team, record);
+    await team.save();
+  }
 
   return team;
 };

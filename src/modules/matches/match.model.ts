@@ -236,9 +236,53 @@ const matchSchema = new mongoose.Schema(
       ref: "Player",
       default: null,
     },
+
+    /*
+    | What they did, as one line - "82 (41) & 2/24".
+    |
+    | Stored rather than recomputed on every read, because it is settled the
+    | moment the match ends and re-deriving it means re-reading every ball of
+    | the match to render one card. A name with no numbers under it invites
+    | the exact argument the card exists to settle.
+    */
+
+    playerOfTheMatchStats: {
+      type: String,
+      default: "",
+      trim: true,
+    },
   },
   {
     timestamps: true,
+
+    /*
+    |--------------------------------------------------------------------------
+    | The PINs Are Never Serialised
+    |--------------------------------------------------------------------------
+    |
+    | res.json() calls toJSON on the document, so every endpoint that returned
+    | a match returned BOTH raw PINs with it - including to the opposing
+    | captain, who is the one person the PIN is supposed to prove something
+    | to. They could read it out of the payload and start the match without
+    | ever being given it.
+    |
+    | Stripping it here means no route can leak it by forgetting to, however
+    | the match is fetched or wrapped.
+    |
+    | This does not affect the server's own checks: startMatch and
+    | verifyMatchPin compare match.teamAPin / match.teamBPin on the document
+    | itself, which is untouched. The only PIN that reaches a client is the
+    | `matchPin` that match.service.ts computes deliberately - that user's own
+    | side's PIN, and only while the match is still upcoming.
+    */
+
+    toJSON: {
+      transform: (_doc, ret: any) => {
+        delete ret.teamAPin;
+        delete ret.teamBPin;
+        return ret;
+      },
+    },
   },
 );
 

@@ -220,6 +220,9 @@ const battingMoments = async (matchIds: any[]) => {
 
       matchId: row._id.matchId,
 
+      // Carried through so two innings by the same batter stay two moments.
+      inningsId: row._id.inningsId,
+
       playerId: row._id.batsmanId,
 
       runs,
@@ -293,6 +296,9 @@ const bowlingMoments = async (matchIds: any[]) => {
 
     matchId: row._id.matchId,
 
+    // Same reason as battingMoments - the grouping is per innings.
+    inningsId: row._id.inningsId,
+
     playerId: row._id.bowlerId,
 
     wickets: row.wickets,
@@ -358,12 +364,16 @@ const hatTrickMoments = async (matchIds: any[]) => {
       streak = isBowlerWicket ? streak + 1 : 0;
 
       if (streak === 3) {
-        const [matchId, , bowlerId] = key.split("|");
+        // The middle field is inningsId - it used to be skipped, which
+        // merged a bowler's hat-tricks in the two innings of one match.
+        const [matchId, inningsId, bowlerId] = key.split("|");
 
         moments.push({
           type: "HAT_TRICK",
 
           matchId,
+
+          inningsId,
 
           playerId: bowlerId,
 
@@ -398,7 +408,7 @@ const ballMoments = async (matchIds: any[]) => {
     matchId: { $in: matchIds },
     $or: [{ runs: 6 }, { isWicket: true }],
   })
-    .select("matchId batsmanId bowlerId runs isWicket wicketType commentaryText createdAt over ball")
+    .select("matchId inningsId batsmanId bowlerId runs isWicket wicketType commentaryText createdAt over ball")
     .sort({ createdAt: -1 })
     .limit(300)
     .lean();
@@ -410,6 +420,12 @@ const ballMoments = async (matchIds: any[]) => {
       type: isSix ? "SIX" : "WICKET",
 
       matchId: ball.matchId,
+
+      /*
+      | Without this, over 3 ball 2 of the first innings and over 3 ball 2
+      | of the second produce the same id.
+      */
+      inningsId: ball.inningsId,
 
       playerId: isSix ? ball.batsmanId : ball.bowlerId,
 
@@ -431,6 +447,53 @@ const ballMoments = async (matchIds: any[]) => {
 | Match Results
 |--------------------------------------------------------------------------
 */
+
+/*
+|--------------------------------------------------------------------------
+| Moment Identity
+|--------------------------------------------------------------------------
+|
+| Every row in the feed needs an id that is unique across the whole feed,
+| because React uses it as the list key. The old one was:
+|
+|     `${moment.type}-${moment.matchId}-${moment.playerId || index}`
+|
+| ...which is not an identity at all for most of these moments. ballMoments
+| emits ONE ROW PER BALL - every six and every wicket, up to 300 of them - so
+| a bowler who took three wickets in a match produced three rows all called
+| WICKET-<matchId>-<bowlerId>, and a batsman with four sixes produced four
+| SIX-<matchId>-<batsmanId>. React then reported, once per collision:
+|
+|     Encountered two children with the same key, WICKET-6a95b10e...-6a3d88fd...
+|
+| Duplicate keys are not cosmetic: React matches children by key across
+| renders, so rows sharing one can be duplicated or dropped, and state
+| attached to a row can follow the wrong row.
+|
+| battingMoments and bowlingMoments had a second, quieter version of the
+| same bug. They group by { matchId, inningsId, playerId } - deliberately,
+| so a fifty in each innings of a two-innings match counts as two fifties -
+| but the row they returned DROPPED inningsId, so the two collapsed back
+| into one id. The grouping was fixed; the identity was not.
+|
+| The id is now built from every field that actually distinguishes a moment,
+| with the innings and the ball included where they exist. `filter` skips
+| the parts a given moment type does not have, so a MATCH_RESULT (no player,
+| no innings, no ball) still produces a short, stable id.
+*/
+
+const momentId = (moment: any, index: number) => {
+  const parts = [
+    moment.type,
+    moment.matchId,
+    moment.inningsId,
+    moment.playerId,
+    moment.over,
+    moment.ballNumber,
+  ].filter((part) => part !== undefined && part !== null && part !== "");
+
+  return parts.length > 1 ? parts.map(String).join("-") : `moment-${index}`;
+};
 
 const resultMoments = (matches: any[]) =>
   matches
@@ -508,6 +571,21 @@ export const getHighlights = async (options: {
 
   const playerById = new Map(players.map((p) => [String(p._id), p]));
 
+  /*
+  | Uniqueness by construction, not by hope.
+  |
+  | momentId composes an id from the fields that identify a moment, which is
+  | correct for every case known today. This pass makes it true for every
+  | case, including ones nobody has thought of: if two rows ever produce the
+  | same id, the second gets its position appended.
+  |
+  | A list key has to be unique or React misbehaves, so "should not collide"
+  | is not a strong enough guarantee to ship - especially for a feed built by
+  | five independent producers whose output is concatenated.
+  */
+
+  const usedIds = new Set<string>();
+
   return top.map((moment, index) => {
     const match = matchById.get(String(moment.matchId));
 
@@ -515,8 +593,16 @@ export const getHighlights = async (options: {
       ? playerById.get(String(moment.playerId))
       : null;
 
+    let id = momentId(moment, index);
+
+    if (usedIds.has(id)) {
+      id = `${id}-${index}`;
+    }
+
+    usedIds.add(id);
+
     return {
-      id: `${moment.type}-${moment.matchId}-${moment.playerId || index}`,
+      id,
 
       type: moment.type,
 

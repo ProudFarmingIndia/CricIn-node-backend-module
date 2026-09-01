@@ -1,6 +1,11 @@
 import Player from "./player.model";
 import Team from "../teams/team.model";
 
+import {
+  getCareerStats,
+  getPlayerMatchHistory,
+} from "./player.stats.service";
+
 import { assertCanManagePlayers } from "../teams/team.service";
 
 /*
@@ -124,8 +129,57 @@ export const getAllPlayers = async () => {
 |--------------------------------------------------------------------------
 */
 
+/*
+|--------------------------------------------------------------------------
+| Fresh Career Stats On Every Profile Read
+|--------------------------------------------------------------------------
+|
+| Player.stats is written when a match completes, but reading the STORED
+| value alone would have two problems, and the second is the one the user
+| hit today.
+|
+|   1. Anything that changes after the fact - an undo that reopens a match,
+|      a corrected result - leaves the stored figure behind until that
+|      player's next match ends.
+|
+|   2. Every match completed BEFORE the stats writer existed left nothing
+|      behind at all. Reading the stored value would show zeroes for a whole
+|      season of cricket until each of those players happened to play again.
+|
+| Computing on read costs one indexed match query and one ball query for
+| that player's completed matches, and removes staleness as a category of
+| bug. The stored copy stays, for leaderboards and sorting later.
+|
+| Never throws: a profile must still open if the stats query fails.
+*/
+
+const withCareerStats = async (player: any) => {
+  if (!player) return player;
+
+  try {
+    const [stats, matches] = await Promise.all([
+      getCareerStats(player._id),
+      getPlayerMatchHistory(player._id),
+    ]);
+
+    const plain = typeof player.toObject === "function"
+      ? player.toObject()
+      : player;
+
+    /*
+    | `matches` is what the profile's Matches tab reads. It was never set by
+    | anything, on any schema, so that tab said "No Matches Found" for every
+    | player who had ever played.
+    */
+
+    return { ...plain, stats, matches };
+  } catch {
+    return player;
+  }
+};
+
 export const getPlayerById = async (playerId: string) => {
-  return await Player.findById(playerId)
+  const player = await Player.findById(playerId)
     .select("-mobile")
     .populate({
   path: "teams",
@@ -153,6 +207,8 @@ export const getPlayerById = async (playerId: string) => {
     },
   ],
 });
+
+  return await withCareerStats(player);
 };
 
 /*
@@ -164,7 +220,7 @@ export const getPlayerById = async (playerId: string) => {
 export const getMyPlayerProfile = async (
   userId: string,
 ) => {
-  return await Player.findOne({
+  const player = await Player.findOne({
     userId,
   })
 
@@ -208,6 +264,8 @@ export const getMyPlayerProfile = async (
     },
   ],
 });
+
+  return await withCareerStats(player);
 };
 
 /*
