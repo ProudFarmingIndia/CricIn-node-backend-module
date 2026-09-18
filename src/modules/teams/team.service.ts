@@ -2,8 +2,14 @@ import mongoose from "mongoose";
 
 import Team from "./team.model";
 import Player from "../players/player.model";
+import User from "../users/user.model";
+
+import { checkPhone, isPhoneOk } from "../../shared/constants/phone";
 import TeamBlockedDate from "./teamBlockedDate.model";
 import TeamInvitation from "../teamInvitations/invitation.model";
+
+/* Same model, aliased for readability inside createLocalPlayer. */
+import Invitation from "../teamInvitations/invitation.model";
 
 import {
   computeTeamStats,
@@ -151,15 +157,165 @@ export const assertCanSendInvitations = async (
 |--------------------------------------------------------------------------
 */
 
-export const createTeam = async (userId: string, payload: any) => {
-  const existingTeam = await Team.findOne({
-    teamName: payload.teamName.trim(),
-    isActive: true,
-  });
+/*
+|--------------------------------------------------------------------------
+| Team Name / Short Name Availability
+|--------------------------------------------------------------------------
+|
+| WHY THIS EXISTS AS A SERVICE AND NOT JUST A CHECK IN THE APP
+|
+| The app asks this endpoint while the user types so it can disable the
+| Continue button and show the error under the field, rather than letting
+| them fill in a whole form and rejecting it on submit. That is UX.
+|
+| The SAME functions run inside createTeam and updateTeam, because the app
+| cannot be trusted: anyone can POST to /api/teams with curl. A check that
+| only lives in the client is decoration.
+|
+| CASE INSENSITIVITY WAS A REAL HOLE
+|
+| The previous check was:
+|
+|     Team.findOne({ teamName: payload.teamName.trim(), isActive: true })
+|
+| An exact string match. "Delhi Warriors" and "delhi warriors" and
+| "DELHI WARRIORS" were three different teams, which is not what any user
+| means by "that name is taken" - and it makes teamName useless as a way to
+| find a team by name.
+|
+| Collation strength 2 compares case-insensitively (and accent-
+| insensitively) in the database rather than pulling rows back and
+| lowercasing in Node.
+|
+| SHORT NAME WAS NOT CHECKED AT ALL
+|
+| shortName appears on every scorecard. Two teams sharing "DW" makes a
+| scoreboard ambiguous at exactly the moment it matters. It is uppercased
+| by the schema, so a plain match is already case-insensitive - but the
+| collation is applied anyway so the two behave identically.
+|
+| NOTE ON THE INDEX
+|
+| There is deliberately no `unique: true` on either field. Adding one to a
+| collection that already contains duplicates fails to build the index and
+| the deploy dies. Dedupe the existing rows first, then add:
+|
+|     teamSchema.index(
+|       { teamName: 1 },
+|       { unique: true, collation: { locale: "en", strength: 2 } },
+|     );
+|
+| Until then this service check is the only guard, which means two people
+| creating the same name in the same second can both succeed. Rare, and
+| survivable - a wrong error message on a form is worse than a rare race.
+*/
 
-  if (existingTeam) {
-    throw new Error("Team name already exists.");
+const CI = { locale: "en", strength: 2 } as const;
+
+type NameCheck = {
+  available: boolean;
+  message: string;
+};
+
+const checkOneName = async (
+  field: "teamName" | "shortName",
+  rawValue: string,
+  excludeTeamId?: string,
+): Promise<NameCheck> => {
+  const value = String(rawValue || "").trim();
+
+  const label = field === "teamName" ? "Team name" : "Short name";
+
+  if (!value) {
+    return { available: false, message: `${label} is required.` };
   }
+
+  if (field === "shortName" && value.length > 6) {
+    return { available: false, message: "Short name can be at most 6 characters." };
+  }
+
+  if (field === "teamName" && value.length > 50) {
+    return { available: false, message: "Team name can be at most 50 characters." };
+  }
+
+  const query: any = {
+    [field]: field === "shortName" ? value.toUpperCase() : value,
+    isActive: true,
+  };
+
+  /*
+  | Editing a team must not collide with itself - otherwise saving any other
+  | field on the edit screen reports the team's own name as taken.
+  */
+  if (excludeTeamId && mongoose.Types.ObjectId.isValid(excludeTeamId)) {
+    query._id = { $ne: new mongoose.Types.ObjectId(excludeTeamId) };
+  }
+
+  const clash = await Team.findOne(query).collation(CI).select("_id").lean();
+
+  return clash
+    ? {
+        available: false,
+        message: `${label} “${value}” is already taken. Try another.`,
+      }
+    : { available: true, message: "" };
+};
+
+/*
+| Both names in one round trip. The app calls this on a debounce while the
+| user types, so it answers about both fields at once rather than making
+| the client fire two requests per keystroke.
+*/
+
+export const checkNameAvailability = async (
+  teamName?: string,
+  shortName?: string,
+  excludeTeamId?: string,
+) => {
+  const [name, short] = await Promise.all([
+    /*
+    | An empty field is "not yet answered", not "unavailable" - the user is
+    | still typing and an error under an untouched field is noise.
+    */
+    teamName === undefined
+      ? Promise.resolve(null)
+      : checkOneName("teamName", teamName, excludeTeamId),
+
+    shortName === undefined
+      ? Promise.resolve(null)
+      : checkOneName("shortName", shortName, excludeTeamId),
+  ]);
+
+  return {
+    teamName: name,
+    shortName: short,
+    available: (!name || name.available) && (!short || short.available),
+  };
+};
+
+/*
+| The write-side guard. Throws the first problem it finds so the message
+| reaching the client names the actual field.
+*/
+
+const assertNamesAvailable = async (
+  teamName: string,
+  shortName: string,
+  excludeTeamId?: string,
+) => {
+  const result = await checkNameAvailability(teamName, shortName, excludeTeamId);
+
+  if (result.teamName && !result.teamName.available) {
+    throw new Error(result.teamName.message);
+  }
+
+  if (result.shortName && !result.shortName.available) {
+    throw new Error(result.shortName.message);
+  }
+};
+
+export const createTeam = async (userId: string, payload: any) => {
+  await assertNamesAvailable(payload.teamName, payload.shortName);
 
   /*
   |--------------------------------------------------------------------------
@@ -345,6 +501,16 @@ export const updateTeam = async (
   }
 
   await assertCanEditTeam(team, userId);
+
+  /*
+  | Only checked when the payload actually carries a name. An edit that
+  | changes only the bio must not be rejected because some OTHER team was
+  | created with a clashing name since - and `excludeTeamId` stops the team
+  | colliding with itself.
+  */
+  if (payload.teamName !== undefined || payload.shortName !== undefined) {
+    await assertNamesAvailable(payload.teamName, payload.shortName, teamId);
+  }
 
   const updated = await Team.findByIdAndUpdate(teamId, payload, {
     new: true,
@@ -874,22 +1040,112 @@ export const updateTeamStats = async (teamId: string) => {
 |--------------------------------------------------------------------------
 */
 
+/*
+|--------------------------------------------------------------------------
+| Create Local Player - and the User account behind them
+|--------------------------------------------------------------------------
+|
+| A captain at a ground types a team-mate's name and number. That person is
+| not on CricIn. Before this change they became a Player row with
+| `userId: null` - a record of a human that the human themselves could
+| never reach.
+|
+| The problem showed up the day they signed up. OTP login does
+| `User.findOne({ phone })`, found nothing, created a BRAND NEW user, and
+| gave them an empty profile - while their real one, with their matches and
+| their team membership, sat orphaned under a different id. Their history
+| was in the database and invisible to them, permanently.
+|
+| So the User is created now, at the same moment as the Player, with the
+| phone number as the link. When that person finally logs in, OTP finds the
+| existing User, and the Player already attached to it is their profile -
+| squad membership, past matches and all.
+|
+| WHAT THIS DOES NOT DO
+|
+| It does not verify the number, and it does not log anyone in. The User is
+| created with isVerified:false and no OTP; the only way into that account
+| is still an OTP sent to that handset. Creating the row is not creating a
+| session.
+|
+| MOBILE IS NOW REQUIRED
+|
+| It used to be optional, which was the whole problem - a player with no
+| number can never be linked to anybody, so the record is write-only. The
+| number IS the identity here.
+|
+| Validated through the same shared/constants/phone.ts the OTP flow uses,
+| so "9876543210" and "+91 98765 43210" normalise to the same thing and a
+| landline is rejected before it becomes an account nobody can sign into.
+*/
+
 export const createLocalPlayer = async (
   userId: string,
   teamId: string,
   payload: any,
 ) => {
+  /*
+  |------------------------------------------------------------------------
+  | Validate before opening a transaction
+  |------------------------------------------------------------------------
+  |
+  | Cheap checks first. Starting a session to immediately abort it costs a
+  | round trip to the primary for nothing.
+  */
+
+  const playerName = String(payload.playerName || "").trim();
+
+  if (!playerName) {
+    throw new Error("Player name is required.");
+  }
+
+  const check = checkPhone(payload.mobile, payload.countryCode);
+
+  if (!isPhoneOk(check)) {
+    throw new Error(check.message);
+  }
+
+  const { phone, rule } = check;
+
+  /*
+  | playerType is `required: true` on the Player schema with a fixed enum.
+  | Checked here so the failure is a readable sentence rather than a raw
+  | Mongoose ValidationError - which is what the captain used to see when
+  | the app did not send it at all.
+  */
+
+  /*
+  | `as const` so the literal union survives, and the variable is typed as
+  | that union. Without it playerType is a plain `string`, which the schema
+  | typing rejects: Player.playerType is the four literals, not any string.
+  */
+
+  const PLAYER_TYPES = [
+    "Batsman",
+    "Bowler",
+    "All-Rounder",
+    "Wicket Keeper",
+  ] as const;
+
+  type PlayerType = (typeof PLAYER_TYPES)[number];
+
+  const playerType = String(payload.playerType || "").trim() as PlayerType;
+
+  if (!playerType) {
+    throw new Error("Please choose a player type.");
+  }
+
+  if (!PLAYER_TYPES.includes(playerType)) {
+    throw new Error(
+      `Player type must be one of: ${PLAYER_TYPES.join(", ")}.`,
+    );
+  }
+
   const session = await mongoose.startSession();
 
   session.startTransaction();
 
   try {
-    /*
-    |--------------------------------------------------------------------------
-    | Team
-    |--------------------------------------------------------------------------
-    */
-
     const team = await Team.findById(teamId).session(session);
 
     if (!team) {
@@ -899,51 +1155,161 @@ export const createLocalPlayer = async (
     await assertCanManagePlayers(team, userId);
 
     /*
-    |--------------------------------------------------------------------------
-    | Squad Limit
-    |--------------------------------------------------------------------------
+    | The inviter's own Player profile - invitation.invitedBy is a Player
+    | reference, not a User one.
     */
+    const actor = await Player.findOne({ userId }).session(session);
+
+    if (!actor) {
+      throw new Error(
+        "Complete your own player profile before adding players.",
+      );
+    }
 
     if (team.players.length >= 15) {
       throw new Error("Maximum 15 players allowed.");
     }
 
     /*
-    |--------------------------------------------------------------------------
-    | Duplicate Mobile (Optional)
-    |--------------------------------------------------------------------------
+    |----------------------------------------------------------------------
+    | Does this person already exist?
+    |----------------------------------------------------------------------
+    |
+    | Three cases, and they are genuinely different:
+    |
+    |   A PLAYER PROFILE EXISTS. Whether local or registered, this human is
+    |   already in CricIn. Creating a second profile splits their career
+    |   stats across two records that can never be merged - so refuse, and
+    |   point at the invite flow, which adds the EXISTING player.
+    |
+    |   A USER EXISTS BUT HAS NO PLAYER. Someone signed up and never
+    |   finished their profile. Reuse that account rather than colliding
+    |   with the unique index on phone - and the profile the captain is
+    |   filling in becomes theirs when they next log in.
+    |
+    |   NEITHER EXISTS. Create both.
     */
 
-    if (payload.mobile) {
-      const existingPlayer = await Player.findOne({
-        mobile: payload.mobile,
-      }).session(session);
+    const existingPlayer = await Player.findOne({ mobile: phone }).session(
+      session,
+    );
 
-      if (existingPlayer) {
-        throw new Error("Player already exists. Invite the player instead.");
+    if (existingPlayer) {
+      /*
+      | Already in THIS squad is a different, friendlier message than
+      | already on CricIn - the captain has simply added them twice.
+      */
+      const alreadyInSquad = team.players.some((id: any) =>
+        id.equals(existingPlayer._id),
+      );
+
+      throw new Error(
+        alreadyInSquad
+          ? `${existingPlayer.playerName} is already in this squad.`
+          : `${existingPlayer.playerName} is already on CricIn with this number. Use "Invite CricIn Player" instead.`,
+      );
+    }
+
+    let user: any = await User.findOne({ phone }).session(session);
+
+    if (user) {
+      const linked = await Player.findOne({ userId: user._id }).session(session);
+
+      if (linked) {
+        throw new Error(
+          `${linked.playerName} is already on CricIn with this number. Use "Invite CricIn Player" instead.`,
+        );
       }
+    } else {
+      const created = await User.create(
+        [
+          {
+            phone,
+            countryCode: rule.code,
+            fullName: playerName,
+
+            /*
+            | NOT verified. This account has never proved it owns the
+            | number - only an OTP to that handset can do that, and that
+            | has not happened. isVerified flips on first successful login.
+            */
+            isVerified: false,
+          },
+        ],
+        { session },
+      );
+
+      user = created[0];
     }
 
     /*
-    |--------------------------------------------------------------------------
-    | Create Local Player
-    |--------------------------------------------------------------------------
+    |----------------------------------------------------------------------
+    | The player profile
+    |----------------------------------------------------------------------
+    |
+    | isLocal stays TRUE. It no longer means "has no User account" - it
+    | means "this profile was filled in by somebody else and the person it
+    | describes has not confirmed it". Flip it to false when they log in
+    | and complete their own profile.
+    |
+    | Everything except the name is optional on purpose. The captain is
+    | standing on a field with eleven people waiting; batting style and
+    | jersey number are for the player to fill in later.
     */
 
     const player = await Player.create(
       [
         {
-          playerName: payload.playerName,
+          userId: user._id,
 
-          mobile: payload.mobile || "",
+          playerName,
 
-          playerType: payload.playerType,
+          mobile: phone,
 
-          battingStyle: payload.battingStyle,
+          playerType,
 
-          bowlingStyle: payload.bowlingStyle,
+          /*
+          |------------------------------------------------------------------
+          | Optional details
+          |------------------------------------------------------------------
+          |
+          | Every one of these is a field the Player schema really has, in
+          | the shape it really wants. An earlier version passed `age`,
+          | `countryCode` and a `profileImage` STRING - the schema has `dob`,
+          | no countryCode, and profileImage as { url, publicId } - so
+          | Mongoose dropped all three silently in strict mode and the
+          | captain saw "Success" with nothing saved.
+          |
+          | gender is `|| null`, NOT `|| ""`. Its enum is
+          | ["Male","Female","Other"] and "" is not in it, so an empty string
+          | fails validation on every save. Mongoose skips enum checks for
+          | null on a non-required field, which is what "not set" has to be.
+          |
+          | dob and jerseyNumber are null rather than "" for the same class
+          | of reason - a Date and a Number field will not take an empty
+          | string.
+          */
 
-          jerseyNumber: payload.jerseyNumber || null,
+          gender: payload.gender || null,
+
+          dob: payload.dob || null,
+
+          country: payload.country || "IN",
+
+          state: payload.state || "",
+
+          city: payload.city || "",
+
+          battingStyle: payload.battingStyle || "",
+
+          bowlingStyle: payload.bowlingStyle || "",
+
+          jerseyNumber:
+            payload.jerseyNumber === "" ||
+            payload.jerseyNumber === undefined ||
+            payload.jerseyNumber === null
+              ? null
+              : Number(payload.jerseyNumber),
 
           isLocal: true,
 
@@ -952,26 +1318,73 @@ export const createLocalPlayer = async (
           teams: [team._id],
         },
       ],
-      {
-        session,
-      },
+      { session },
     );
 
     /*
-    |--------------------------------------------------------------------------
-    | Add Into Team
-    |--------------------------------------------------------------------------
+    |----------------------------------------------------------------------
+    | An INVITATION, not a squad membership
+    |----------------------------------------------------------------------
+    |
+    | The player is NOT pushed into team.players. Adding somebody to a team
+    | without asking them is the thing this whole flow exists to stop: a
+    | captain could previously put any phone number into a squad, and the
+    | person it belonged to had no say and no way to leave a team they
+    | never joined.
+    |
+    | So the profile is created, the account behind it is created, and a
+    | PENDING invitation is raised. They join when they log in and accept.
+    |
+    | Created here in the same transaction as the Player, so there is never
+    | a profile sitting without the invitation that explains why it exists.
     */
 
-    team.players.push(player[0]._id);
+    const invitation = await Invitation.create(
+      [
+        {
+          teamId: team._id,
+          playerId: player[0]._id,
 
-    await team.save({
-      session,
-    });
+          /*
+          | invitedBy is a PLAYER reference, not a User. The captain's own
+          | player profile is required for it - which every captain has, or
+          | they could not have created the team.
+          */
+          invitedBy: actor?._id,
+
+          message: `${team.teamName} added you to their squad. Accept to join.`,
+        },
+      ],
+      { session },
+    );
 
     await session.commitTransaction();
 
     session.endSession();
+
+    /*
+    |----------------------------------------------------------------------
+    | Tell them they exist
+    |----------------------------------------------------------------------
+    |
+    | AFTER the commit, never inside it. An SMS cannot be rolled back, so
+    | sending before the transaction lands risks telling somebody about an
+    | account that then failed to save.
+    |
+    | Not wired up yet - deliberately. SMS delivery is still being sorted
+    | out with MSG91, and this would need its own DLT-approved template
+    | ("You have been added to <team> on CricIn. Log in with this number to
+    | complete your profile."). When that template is approved, send it
+    | here and let a failure log rather than throw: the player was created
+    | successfully whether or not the message went.
+    */
+
+    if (process.env.NODE_ENV !== "production") {
+      console.log(
+        `[team] ${playerName} (${rule.dialCode} ${phone}) - user ${user._id}, ` +
+          `invitation ${invitation[0]._id} PENDING`,
+      );
+    }
 
     return await Team.findById(teamId)
       .populate("captainId")

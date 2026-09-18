@@ -8,6 +8,7 @@ import teamRoutes from "./modules/teams/team.routes";
 import matchRoutes from "./modules/matches/match.routes";
 import scoreRoutes from "./modules/scoring/scoring.routes";
 import tournamentRoutes from "./modules/tournaments/tournament.routes";
+import seriesRoutes from "./modules/series/series.routes";
 import groundRoutes from "./modules/grounds/ground.routes";
 import notificationRoutes from "./modules/notifications/notification.routes";
 import followRoutes from "./modules/follows/follow.routes";
@@ -21,12 +22,34 @@ import teamReviewRoutes from "./modules/teamReviews/teamReview.routes";
 import searchRoutes from "./modules/search/search.routes";
 import scoringRequestRoutes from "./modules/scoringRequests/scoringRequest.routes";
 import highlightRoutes from "./modules/highlights/highlight.routes";
-import statsRoutes from "./modules/stats/stats.routes";  
+import statsRoutes from "./modules/stats/stats.routes";
+import liveStreamRoutes from "./modules/liveStream/liveStream.routes";
+import muxWebhookRoutes from "./modules/liveStream/muxWebhook.routes";
 
 const app = express();
 
 app.use(cors());
+
+/*
+|--------------------------------------------------------------------------
+| Mux Webhook - Registered BEFORE express.json()
+|--------------------------------------------------------------------------
+|
+| Mux signs the raw request body. express.json() parses and discards those
+| exact bytes, so once it has run the HMAC can never match again and every
+| webhook is rejected with a 401 that looks identical to a wrong secret.
+|
+| This one route therefore has to claim the request before the global JSON
+| parser sees it. It applies express.raw() to itself.
+|
+| Moving this line below express.json() silently breaks live status.
+|
+*/
+
+app.use("/api/webhooks/mux", muxWebhookRoutes);
+
 app.use(express.json());
+
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/players", playerRoutes);
@@ -34,6 +57,7 @@ app.use("/api/teams", teamRoutes);
 app.use("/api/matches", matchRoutes);
 app.use("/api/scoring", scoreRoutes);
 app.use("/api/tournaments", tournamentRoutes);
+app.use("/api/series", seriesRoutes);
 app.use("/api/grounds", groundRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/follows", followRoutes);
@@ -48,8 +72,7 @@ app.use("/api/search", searchRoutes);
 app.use("/api/scoring-requests", scoringRequestRoutes);
 app.use("/api/highlights", highlightRoutes);
 app.use("/api/stats", statsRoutes);
-
-
+app.use("/api/live-streams", liveStreamRoutes);
 
 app.get("/", (_, res) => {
   res.send("Backend Running");
@@ -82,8 +105,16 @@ app.use(
   ) => {
     console.error(err);
 
+    /*
+    | AppError carries its own status; ValidationError/CastError are
+    | Mongoose's way of saying the client sent something wrong.
+    */
+
     const status =
-      err.name === "ValidationError" || err.name === "CastError" ? 400 : 500;
+      err.statusCode ??
+      (err.name === "ValidationError" || err.name === "CastError"
+        ? 400
+        : 500);
 
     res.status(status).json({
       success: false,

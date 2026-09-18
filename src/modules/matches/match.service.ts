@@ -29,6 +29,14 @@ import {
 } from "../follows/follow.fanout";
 
 /*
+| Tournament points table + bracket progression. Imported here because
+| finalizing a match is the single moment a tournament advances.
+*/
+
+import { recomputeStandingsForMatch } from "../tournaments/standings.service";
+import { recomputeScorelineForMatch } from "../series/series.service";
+
+/*
 |--------------------------------------------------------------------------
 | Helpers
 |--------------------------------------------------------------------------
@@ -83,6 +91,69 @@ const canManageTeam = async (team: any, userId: string): Promise<boolean> => {
 
 /*
 |--------------------------------------------------------------------------
+| Which PINs does this person have to produce?
+|--------------------------------------------------------------------------
+|
+| ONE rule, in ONE place: a PIN is required for each of the two teams the
+| starter does NOT manage.
+|
+|   manages both     no PIN - they own both sides, there is nobody to
+|                    prove anything to
+|   manages one      the opponent's PIN
+|   manages neither  BOTH PINs, one from each captain
+|
+| The third case is the tournament and series organizer. They are the
+| match's scorer by default and manage neither side, so starting a match
+| means collecting a PIN from each captain - which is exactly right. An
+| organizer who could start a fixture alone could start it while one team
+| was still travelling.
+|
+| WHY THIS IS EXPORTED AND CALLED FROM getMatchById TOO
+| The screen that collects the PINs and the gate that checks them have to
+| agree perfectly. Derived separately they will drift, and the failure is
+| silent and horrible: the app asks for one PIN, the server demands two,
+| and the organizer stands at the ground reading "Incorrect PIN for Team A"
+| while holding a PIN that is completely correct.
+|
+| So the UI does not re-derive the rule. It renders whatever this returns.
+|
+*/
+
+export const requiredPinSides = (
+  match: any,
+  managesTeamA: boolean,
+  managesTeamB: boolean,
+) => {
+  const sides: { side: "teamA" | "teamB"; teamName: string; hasPin: boolean }[] =
+    [];
+
+  if (!managesTeamA) {
+    sides.push({
+      side: "teamA",
+      teamName: match?.teamA?.teamName || "Team A",
+      /*
+      | A match with no PIN stored for that side cannot be gated on one -
+      | the gate skips it, so the UI must not ask for it either. This is
+      | true of matches created before PINs existed, and of a side whose
+      | PIN was already spent.
+      */
+      hasPin: !!match?.teamAPin,
+    });
+  }
+
+  if (!managesTeamB) {
+    sides.push({
+      side: "teamB",
+      teamName: match?.teamB?.teamName || "Team B",
+      hasPin: !!match?.teamBPin,
+    });
+  }
+
+  return sides.filter((s) => s.hasPin);
+};
+
+/*
+|--------------------------------------------------------------------------
 | Create Match
 |--------------------------------------------------------------------------
 */
@@ -133,10 +204,28 @@ export const getMatchById = async (matchId: string, userId?: string) => {
   let matchPin: string | null | undefined;
   let isInviteSender = false;
 
+  /*
+  | Per-side management, sent to the client as well as `canManage`.
+  |
+  | `canManage` is "manages EITHER team", which is the wrong question for
+  | two things the app has to decide: which PINs to ask for, and whether
+  | to show a Start Match button at all.
+  */
+
+  let managesTeamA = false;
+  let managesTeamB = false;
+
+  /* Which PINs this user must produce - see requiredPinSides. */
+  let pinsRequired: ReturnType<typeof requiredPinSides> = [];
+
   if (userId) {
-    const managesTeamA = await canEditTeam(match.teamA, userId);
-    const managesTeamB = await canEditTeam(match.teamB, userId);
+    managesTeamA = await canEditTeam(match.teamA, userId);
+    managesTeamB = await canEditTeam(match.teamB, userId);
     canManage = managesTeamA || managesTeamB;
+
+    if (match.status === "upcoming") {
+      pinsRequired = requiredPinSides(match, managesTeamA, managesTeamB);
+    }
 
     /*
     | Only while the match is still waiting to start. Once it is live,
@@ -167,17 +256,50 @@ export const getMatchById = async (matchId: string, userId?: string) => {
 
   const { teamAPin: _a, teamBPin: _b, ...obj } = match.toObject() as any;
 
+  const isScorer = isMatchScorer(match, userId);
+
   return {
     ...obj,
     canManage,
+    managesTeamA,
+    managesTeamB,
     matchPin,
     isInviteSender,
 
     /*
-    | Whether THIS user is the one scoring. Drives the SCORE NOW button;
-    | canManage drives Start Match, because either captain may start.
+    | Whether THIS user is the one scoring. Drives the SCORE NOW button.
     */
-    isScorer: isMatchScorer(match, userId),
+    isScorer,
+
+    /*
+    |--------------------------------------------------------------------------
+    | Who may START this match
+    |--------------------------------------------------------------------------
+    |
+    | The app gated its Start Match button on `canManage` - "captain of one
+    | of the two teams". That is not the rule startMatch enforces, and the
+    | gap had one specific victim: the TOURNAMENT AND SERIES ORGANIZER.
+    |
+    | An organizer is the fixture's scorer by default and captains neither
+    | side, so `canManage` was false and the button never rendered. They
+    | could open their own tournament's match and had no way to begin it.
+    |
+    | This mirrors startMatch's authorisation exactly: either captain, or
+    | the person recorded as the scorer. What the organizer still has to do
+    | is produce both captains' PINs - see pinsRequired - which is the
+    | correct amount of friction, not a wall.
+    */
+    canStart:
+      match.status === "upcoming" &&
+      (canManage || isScorer || String(match.userId) === String(userId)),
+
+    /*
+    | Exactly which PINs to collect, with the team names to label the
+    | inputs. Empty when none are needed. The screen renders this list
+    | rather than working the rule out for itself, so what is asked for and
+    | what is checked can never disagree.
+    */
+    pinsRequired,
   };
 };
 
@@ -411,33 +533,37 @@ export const startMatch = async (
   |
   */
 
-  const required: { label: string; expected?: string | null; given?: string }[] = [];
+  /*
+  | Built by requiredPinSides - the SAME function getMatchById calls to
+  | tell the app which inputs to draw. One rule, one place: the screen
+  | cannot ask for one PIN while the gate demands two.
+  */
 
-  if (!managesTeamA) {
-    required.push({
-      label: (match.teamA as any)?.teamName || "Team A",
-      expected: match.teamAPin,
-      given: pins?.teamA ?? (managesTeamB ? pin : undefined),
-    });
-  }
-
-  if (!managesTeamB) {
-    required.push({
-      label: (match.teamB as any)?.teamName || "Team B",
-      expected: match.teamBPin,
-      given: pins?.teamB ?? (managesTeamA ? pin : undefined),
-    });
-  }
+  const required = requiredPinSides(match, managesTeamA, managesTeamB);
 
   for (const entry of required) {
-    // A match with no PIN stored for that side cannot be gated on one.
-    if (!entry.expected) {
-      continue;
-    }
+    const expected =
+      entry.side === "teamA" ? match.teamAPin : match.teamBPin;
 
-    if (entry.given !== entry.expected) {
+    /*
+    | `pins` carries the pair and is what the app sends now. `pin` is kept
+    | for the single-PIN callers that already exist: when the starter
+    | manages one side there is only one PIN to give, and the old flat
+    | field is still a correct way to give it.
+    |
+    | It is deliberately NOT accepted when the starter manages neither
+    | side. One value cannot satisfy two different PINs, and letting it
+    | try would mean a lucky collision could open the gate on half the
+    | proof.
+    */
+
+    const given =
+      pins?.[entry.side] ??
+      (required.length === 1 ? pin : undefined);
+
+    if (given !== expected) {
       throw new Error(
-        `Incorrect PIN for ${entry.label}. Ask that team's captain for their PIN.`,
+        `Incorrect PIN for ${entry.teamName}. Ask that team's captain for their PIN.`,
       );
     }
   }
@@ -874,6 +1000,33 @@ export const finalizeMatchFromInnings = async (matchId: string) => {
   void recomputeTeamStatsForMatch(matchId);
 
   void notifyFollowersMatchResult(completed, String(match.userId || ""));
+
+  /*
+  | Tournament standings, on the same rule and at the same moment.
+  |
+  | Fire-and-forget for exactly the reason the two calls above are: the
+  | RESULT is what matters here, and a points-table write must never be
+  | able to stop a match being marked complete. It is a no-op on any match
+  | that is not part of a tournament, and it recomputes the whole table
+  | rather than adding to it, so running it twice is harmless.
+  |
+  | It also advances the bracket - a completed semi-final is what fills in
+  | the Final's teams.
+  */
+
+  void recomputeStandingsForMatch(matchId);
+
+  /*
+  | The series equivalent. Same fire-and-forget contract, same no-op on a
+  | match that belongs to no series, and same recompute-never-increment
+  | reasoning: a scorer undoes balls, a result can flip during a
+  | correction, and a drifted scoreline never tells you it has drifted.
+  |
+  | This is also what flips a series to "completed" once its last match is
+  | played, and what records the moment one side went beyond reach.
+  */
+
+  void recomputeScorelineForMatch(matchId);
 
   return completed;
 };
@@ -2254,6 +2407,29 @@ export const transferScoring = async (
 
   const target = await Player.findOne({ userId: targetUserId });
   if (!target) throw new Error("Target scorer not found.");
+
+  /*
+  |--------------------------------------------------------------------------
+  | Both Teams Must Exist
+  |--------------------------------------------------------------------------
+  |
+  | teamA/teamB are only required once a match leaves `draft` - a match
+  | created by "Go Live" before any details were entered legitimately has
+  | neither. The live-status check above already rules that out in
+  | practice, but reading ._id off them without saying so is a crash
+  | waiting on the one code path that reaches here with a half-filled
+  | match.
+  |
+  | Stated explicitly so the failure is a sentence the captain can act on
+  | rather than "Cannot read properties of null".
+  |
+  */
+
+  if (!match.teamA || !match.teamB) {
+    throw new Error(
+      "Both teams must be set on this match before scoring can be transferred.",
+    );
+  }
 
   const teamAId = String(match.teamA._id);
   const teamBId = String(match.teamB._id);

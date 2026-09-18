@@ -118,6 +118,78 @@ export const NOTIFICATION_TYPES = {
 
   /*
   |--------------------------------------------------------------------------
+  | Tournament - the real flow
+  |--------------------------------------------------------------------------
+  |
+  | The four types above predate the feature and nothing emits them.
+  | These are the ones that actually fire.
+  |
+  | INVITE_RECEIVED goes to the team's CAPTAIN and nobody else - one team,
+  | one answer. It is the only actionable one; the rest are news.
+  |
+  | SCORER_ASSIGNED / REVOKED are a pair, sent in the same operation when
+  | the organizer moves scoring from one person to another. The revoke
+  | matters: somebody who had rights a minute ago will otherwise open the
+  | scoring pad and find every tap rejected with no explanation.
+  |
+  */
+
+  TOURNAMENT_INVITE_RECEIVED: "TOURNAMENT_INVITE_RECEIVED",
+
+  TOURNAMENT_INVITE_ACCEPTED: "TOURNAMENT_INVITE_ACCEPTED",
+
+  TOURNAMENT_INVITE_DECLINED: "TOURNAMENT_INVITE_DECLINED",
+
+  TOURNAMENT_JOIN_REQUEST: "TOURNAMENT_JOIN_REQUEST",
+
+  TOURNAMENT_FIXTURES_READY: "TOURNAMENT_FIXTURES_READY",
+
+  TOURNAMENT_MATCH_REMINDER: "TOURNAMENT_MATCH_REMINDER",
+
+  TOURNAMENT_SCORER_ASSIGNED: "TOURNAMENT_SCORER_ASSIGNED",
+
+  TOURNAMENT_SCORER_REVOKED: "TOURNAMENT_SCORER_REVOKED",
+
+  TOURNAMENT_CANCELLED: "TOURNAMENT_CANCELLED",
+
+  /*
+  |--------------------------------------------------------------------------
+  | Series
+  |--------------------------------------------------------------------------
+  |
+  | A bilateral series has ONE invite, to the opponent team's captain, and
+  | it is the only actionable notification here - everything else is news.
+  |
+  | Deliberately its own set rather than reusing the TOURNAMENT_* types.
+  | They carry different data (a seriesId, not a tournamentId), route to a
+  | different screen, and a user reading "Tournament invite" for a
+  | three-match series would reasonably wonder what they had been entered
+  | into.
+  |
+  | SCORER_ASSIGNED / REVOKED are a pair, sent in the same operation. The
+  | revoke matters: somebody who had rights a minute ago will otherwise
+  | open the scoring pad and find every tap rejected with no explanation.
+  |
+  */
+
+  SERIES_INVITE_RECEIVED: "SERIES_INVITE_RECEIVED",
+
+  SERIES_INVITE_ACCEPTED: "SERIES_INVITE_ACCEPTED",
+
+  SERIES_INVITE_DECLINED: "SERIES_INVITE_DECLINED",
+
+  SERIES_FIXTURES_READY: "SERIES_FIXTURES_READY",
+
+  SERIES_MATCH_REMINDER: "SERIES_MATCH_REMINDER",
+
+  SERIES_SCORER_ASSIGNED: "SERIES_SCORER_ASSIGNED",
+
+  SERIES_SCORER_REVOKED: "SERIES_SCORER_REVOKED",
+
+  SERIES_CANCELLED: "SERIES_CANCELLED",
+
+  /*
+  |--------------------------------------------------------------------------
   | Ground
   |--------------------------------------------------------------------------
   */
@@ -200,6 +272,50 @@ export const NOTIFICATION_TYPES = {
   SCORING_REQUEST_APPROVED: "SCORING_REQUEST_APPROVED",
 
   SCORING_REQUEST_REJECTED: "SCORING_REQUEST_REJECTED",
+
+  /*
+  |--------------------------------------------------------------------------
+  | Live Streaming
+  |--------------------------------------------------------------------------
+  |
+  | Filming a match is a job handed to a named person - often someone in
+  | neither squad, which means nothing in their existing feed would ever
+  | surface the match to them. The invite is how they find out at all.
+  |
+  */
+
+  BROADCAST_INVITE_RECEIVED: "BROADCAST_INVITE_RECEIVED",
+
+  BROADCAST_INVITE_ACCEPTED: "BROADCAST_INVITE_ACCEPTED",
+
+  BROADCAST_INVITE_DECLINED: "BROADCAST_INVITE_DECLINED",
+
+  BROADCAST_INVITE_REVOKED: "BROADCAST_INVITE_REVOKED",
+
+  /*
+  | A camera has actually connected on a match you follow - there is a
+  | picture to watch.
+  |
+  | Deliberately NOT folded into FOLLOWED_MATCH_LIVE. That one fires when
+  | scoring starts and offers a scorecard; this fires when a broadcaster
+  | connects and offers video. They happen at different times, on
+  | different matches, and one type for both would mean promising video on
+  | every match - most of which never have a camera.
+  |
+  | This is also the only push anyone gets about a stream. Watching is
+  | open to every user; being TOLD is for followers.
+  */
+
+  FOLLOWED_STREAM_LIVE: "FOLLOWED_STREAM_LIVE",
+
+  /*
+  | The full match recording is kept for a week, then deleted; the
+  | highlights stay. Announced rather than silent - a video that vanishes
+  | without warning reads as a bug, the same deletion with two days'
+  | notice reads as a policy.
+  */
+
+  RECORDING_EXPIRING: "RECORDING_EXPIRING",
 
   /*
   |--------------------------------------------------------------------------

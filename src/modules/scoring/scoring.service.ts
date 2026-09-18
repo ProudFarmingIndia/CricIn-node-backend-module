@@ -961,7 +961,16 @@ export const setNextBatsman = async (
   inningsId: string,
   playerId: string,
   userId: string,
+  /*
+  | Which end to write. Optional so the old "fill the vacant end" behaviour
+  | still serves the incoming-batter case, but REQUIRED in practice for a
+  | correction - see below.
+  */
+  end?: "striker" | "nonStriker",
 ) => {
+  if (!inningsId) throw new Error("setNextBatsman: missing inningsId");
+  if (!playerId) throw new Error("setNextBatsman: missing playerId");
+
   await assertCanScore(inningsId, userId);
 
   const innings = await Innings.findById(inningsId);
@@ -970,35 +979,99 @@ export const setNextBatsman = async (
     throw new Error("Innings not found.");
   }
 
+  const striker = String(innings.currentStrikerId || "");
+  const nonStriker = String(innings.currentNonStrikerId || "");
+
   /*
-  | Fill whichever end is vacant.
+  |------------------------------------------------------------------------
+  | Which end
+  |------------------------------------------------------------------------
   |
-  | This works now that addBall clears the dismissed batter's end instead of
-  | leaving him standing there - previously the striker's end was never
-  | empty, so a dismissed striker's replacement was written over the not-out
-  | partner at the other end.
+  | An explicit `end` is honoured. Without one it falls back to filling
+  | whichever end is vacant, which is right for an incoming batter after a
+  | wicket - addBall clears the departing batter's end, so exactly one is
+  | empty.
   |
-  | If both ends somehow hold a player, the striker's end is replaced: it is
-  | the end a new batter takes in every dismissal except a run out at the
-  | bowler's end, and overwriting the man on strike is at least visible to
-  | the scorer immediately.
+  | The old code had ONLY the fallback, and when both ends were occupied it
+  | silently overwrote the striker. That is fine for an incoming batter (a
+  | new batter takes strike in every dismissal but a run out at the
+  | bowler's end) and completely wrong for a correction, where the scorer
+  | knows precisely which of the two they mis-tapped.
   */
 
-  const field = !innings.currentStrikerId
-    ? "currentStrikerId"
-    : !innings.currentNonStrikerId
-      ? "currentNonStrikerId"
-      : "currentStrikerId";
+  const field =
+    end === "striker"
+      ? "currentStrikerId"
+      : end === "nonStriker"
+        ? "currentNonStrikerId"
+        : !striker
+          ? "currentStrikerId"
+          : !nonStriker
+            ? "currentNonStrikerId"
+            : "currentStrikerId";
 
-  return await Innings.findByIdAndUpdate(
+  /*
+  |------------------------------------------------------------------------
+  | The same player cannot be at both ends
+  |------------------------------------------------------------------------
+  |
+  | Nothing stopped this before. Setting the striker to whoever is already
+  | at the other end puts one player on both ends: strike rotation then
+  | swaps him with himself, every ball is credited to him, and the innings
+  | can never end because the partnership never breaks. Refused outright.
+  */
+
+  const other = field === "currentStrikerId" ? nonStriker : striker;
+
+  if (other && String(playerId) === other) {
+    throw new Error("That player is already batting at the other end.");
+  }
+
+  /*
+  |------------------------------------------------------------------------
+  | Nobody who is already out
+  |------------------------------------------------------------------------
+  |
+  | A dismissed batter cannot come back. Retirements are deliberately NOT
+  | dismissals here - a retired-hurt batter is stored with isWicket:false
+  | precisely so he can return at the next fall of a wicket, which is what
+  | Law 25.4 allows. So this checks the wicket rows, not the retirement
+  | rows, and a retired batter passes.
+  */
+
+  const alreadyOut = await Scoring.findOne({
     inningsId,
-    {
-      [field]: playerId,
-    },
-    {
-      new: true,
-    },
-  );
+    isWicket: true,
+    dismissedPlayerId: playerId,
+  }).select("_id");
+
+  if (alreadyOut) {
+    throw new Error("That player is already out.");
+  }
+
+  const updated = await Innings.findByIdAndUpdate(
+    inningsId,
+    { [field]: playerId },
+    { new: true },
+  )
+    .populate("currentStrikerId")
+    .populate("currentNonStrikerId")
+    .populate("currentBowlerId");
+
+  /*
+  | Populated and emitted, exactly like setNextBowler. Neither happened
+  | before: the raw ObjectIds went back to the client, which then had to
+  | resolve names from the squad by hand, and nobody else watching the
+  | match saw the change at all.
+  */
+
+  try {
+    getIO().emit("score:update", { innings: updated });
+  } catch (error) {
+    console.warn("[scoring] socket emit failed on setNextBatsman");
+  }
+
+  return updated;
 };
 
 /*

@@ -913,3 +913,115 @@ export const sendSystemNotification = async ({
     message,
   });
 };
+
+/*
+|--------------------------------------------------------------------------
+| Broadcast Invite Received
+|--------------------------------------------------------------------------
+|
+| The person asked to film a match is frequently in neither squad - a
+| substitute, someone's brother, a CricIn operator. Every existing feed
+| filters on team membership, so without this notification the match is
+| invisible to them and the only way they learn about it is somebody
+| sending a WhatsApp message.
+|
+*/
+
+export const sendBroadcastInviteNotification = async ({
+  receiverId,
+  actorId,
+  matchId,
+  angle,
+  matchTitle,
+  actorName,
+}: {
+  receiverId: string;
+
+  actorId: string;
+
+  matchId: string;
+
+  angle: string;
+
+  matchTitle: string;
+
+  actorName?: string;
+}) => {
+  const camera = angle === "third" ? "third umpire" : "front";
+
+  return createNotification({
+    receiverId,
+
+    actorId,
+
+    type: NOTIFICATION_TYPES.BROADCAST_INVITE_RECEIVED,
+
+    title: "Live streaming request",
+
+    message: `${actorName || "The scorer"} asked you to film ${matchTitle} (${camera} camera).`,
+
+    data: {
+      matchId,
+
+      angle,
+    },
+  });
+};
+
+/*
+|--------------------------------------------------------------------------
+| Broadcast Invite Answered
+|--------------------------------------------------------------------------
+|
+| Back to the scorer, who needs to know before the toss whether they still
+| have two cameras or are down to one.
+|
+*/
+
+export const sendBroadcastInviteAnsweredNotification = async ({
+  receiverId,
+  actorId,
+  matchId,
+  angle,
+  matchTitle,
+  actorName,
+  accepted,
+}: {
+  receiverId: string;
+
+  actorId: string;
+
+  matchId: string;
+
+  angle: string;
+
+  matchTitle: string;
+
+  actorName?: string;
+
+  accepted: boolean;
+}) => {
+  const camera = angle === "third" ? "third umpire" : "front";
+
+  return createNotification({
+    receiverId,
+
+    actorId,
+
+    type: accepted
+      ? NOTIFICATION_TYPES.BROADCAST_INVITE_ACCEPTED
+      : NOTIFICATION_TYPES.BROADCAST_INVITE_DECLINED,
+
+    title: accepted ? "Camera confirmed" : "Camera declined",
+
+    message: accepted
+      ? `${actorName || "A player"} will film ${matchTitle} (${camera} camera).`
+      : `${actorName || "A player"} cannot film ${matchTitle} (${camera} camera). Assign someone else.`,
+
+    data: {
+      matchId,
+
+      angle,
+    },
+  });
+};

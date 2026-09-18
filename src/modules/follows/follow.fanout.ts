@@ -168,6 +168,92 @@ export const notifyFollowersMatchLive = async (match: any) => {
 
 /*
 |--------------------------------------------------------------------------
+| Match Stream Going Live
+|--------------------------------------------------------------------------
+|
+| The camera has actually connected - there is a picture to watch.
+|
+| WHY THIS IS SEPARATE FROM notifyFollowersMatchLive
+| That one fires when SCORING starts, and says "follow the score". This
+| one fires when a BROADCASTER connects, which is a different event at a
+| different time (often twenty minutes later, sometimes never) and offers
+| a different thing: video.
+|
+| Merging them would mean either promising video on every match - most of
+| which have no camera - or never mentioning video at all.
+|
+| WHO GETS IT
+| Followers of either team only. Anyone in the app can WATCH; only
+| followers are TOLD. That split is the whole visibility model: open
+| enough that a stream can be discovered, quiet enough that people are
+| not pushed a match they have no connection to.
+|
+| Fires once per match, from the first angle to go live. The webhook is
+| what calls it, and Mux can deliver the same event twice, so the caller
+| guards on a flag - see muxWebhook.controller.
+|
+*/
+
+export const notifyFollowersStreamLive = async (match: any) => {
+  try {
+    const teamA = match?.teamA?._id || match?.teamA;
+
+    const teamB = match?.teamB?._id || match?.teamB;
+
+    if (!teamA || !teamB) {
+      return;
+    }
+
+    const [teamADoc, teamBDoc] = await Promise.all([
+      Team.findById(teamA).select("teamName"),
+      Team.findById(teamB).select("teamName"),
+    ]);
+
+    const recipients = await collectFollowers(
+      [
+        { targetType: "TEAM", targetId: String(teamA) },
+        { targetType: "TEAM", targetId: String(teamB) },
+      ],
+      [String(match?.userId || ""), String(match?.scorerUserId || "")],
+    );
+
+    const fixture = `${teamADoc?.teamName || "Team A"} vs ${
+      teamBDoc?.teamName || "Team B"
+    }`;
+
+    await notifyMany(recipients, (receiverId) => ({
+      receiverId,
+
+      actorId: null,
+
+      type: NOTIFICATION_TYPES.FOLLOWED_STREAM_LIVE,
+
+      title: "Live on camera",
+
+      message: `${fixture} ab live stream par hai. Dekho.`,
+
+      data: {
+        matchId: String(match?._id),
+
+        teamAId: String(teamA),
+
+        teamBId: String(teamB),
+
+        /*
+        | Read by the app when the notification is tapped, so it opens the
+        | player rather than the scorecard.
+        */
+
+        stream: true,
+      },
+    }));
+  } catch (error) {
+    console.error("notifyFollowersStreamLive failed:", error);
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
 | Match Result
 |--------------------------------------------------------------------------
 |

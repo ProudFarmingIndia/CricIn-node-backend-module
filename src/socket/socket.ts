@@ -60,6 +60,29 @@ export const initSocket = (server: any) => {
       socket.join(`user:${userId}`);
     }
 
+    /*
+    |--------------------------------------------------------------------------
+    | Match Rooms
+    |--------------------------------------------------------------------------
+    |
+    | Live score and stream status are per-match, not per-user: a hundred
+    | strangers watching the same game all need the same events, and none
+    | of them are in each other's personal rooms.
+    |
+    | Joining is deliberately open to unauthenticated sockets - a follower
+    | watching a public match is exactly who this is for, and nothing
+    | broadcast into a match room is private.
+    |
+    */
+
+    socket.on("match:join", (matchId: string) => {
+      if (matchId) socket.join(`match:${matchId}`);
+    });
+
+    socket.on("match:leave", (matchId: string) => {
+      if (matchId) socket.leave(`match:${matchId}`);
+    });
+
     socket.on("disconnect", () => {
       console.log("Client Disconnected:", socket.id);
     });
@@ -73,5 +96,20 @@ export const getIO = () => io;
 export const emitToUser = (userId: string, event: string, data: any) => {
   if (io && userId) {
     io.to(`user:${userId}`).emit(event, data);
+  }
+};
+
+/*
+| Everyone watching one match - the live score strip, the LIVE badge, and
+| the "reconnecting" state when a broadcaster's phone drops.
+*/
+
+export const emitToMatch = (
+  matchId: string,
+  event: string,
+  data: any,
+) => {
+  if (io && matchId) {
+    io.to(`match:${matchId}`).emit(event, data);
   }
 };
