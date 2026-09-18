@@ -13,19 +13,88 @@
 | Mux Video client. Used for live stream ingest (RTMPS), HLS playback
 | and match recordings.
 |
-| Fails loudly at boot if credentials are missing - a silent failure here
-| means every "Go Live" in production returns a 500 with no clue why.
+| WHY THIS FILE NO LONGER THROWS AT IMPORT TIME
+|
+| It used to. The reasoning was sound - a silent failure means every
+| "Go Live" returns a 500 with no clue why - but the blast radius was
+| not. `throw` at module scope runs the moment anything imports this
+| file, and the import chain reaches it before a single route is
+| registered:
+|
+|     server.ts -> app.ts -> liveStream.routes -> liveStream.service
+|                                                       -> config/mux
+|
+| server.ts also imports monitorLiveStreams and manageRecordings
+| directly, and both pull in this file too. So a missing MUX_TOKEN_ID
+| did not break live streaming - it stopped the process from booting at
+| all. Login, teams, tournaments, scoring, notifications: nothing ran.
+| That is exactly what happened on the first Render deploy.
+|
+| viewerRegistry.ts makes the point best. It imports ONE number from
+| here - MAX_VIEWERS_PER_MATCH - and used to inherit a credential check
+| along with it.
+|
+| So the failure is now scoped to the thing that actually failed. The
+| constants below are plain values that anyone can import safely. The
+| client is built on first use, and only a call that genuinely needs Mux
+| raises an error - a 503 through the normal error handler, with a
+| message that says what is missing.
 |
 |--------------------------------------------------------------------------
 */
 
 import Mux from "@mux/mux-node";
 
-if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) {
-  throw new Error(
-    "MUX_TOKEN_ID / MUX_TOKEN_SECRET missing in .env",
-  );
-}
+import AppError from "../shared/errors/AppError";
+
+/*
+|--------------------------------------------------------------------------
+| Reading Numbers From The Environment
+|--------------------------------------------------------------------------
+|
+| `Number(process.env.X || 40)` has a quiet failure mode: a typo makes it
+| NaN, and NaN passes through every comparison as false. MAX_VIEWERS_PER_MATCH
+| is the one that matters - its whole job is to stop an unexpected bill, and
+| `viewers > NaN` is false forever, so a mistyped cap is the same as no cap
+| and nothing says so.
+|
+| This reads the same way but says something when the value is unusable, and
+| still lets an explicit 0 through (the documented way to switch the cap off).
+|
+*/
+
+const num = (name: string, fallback: number): number => {
+  const raw = process.env[name];
+
+  if (raw === undefined || raw.trim() === "") return fallback;
+
+  const parsed = Number(raw);
+
+  if (!Number.isFinite(parsed)) {
+    console.warn(
+      `[mux] ${name}="${raw}" is not a number - falling back to ${fallback}.`,
+    );
+
+    return fallback;
+  }
+
+  return parsed;
+};
+
+/*
+|--------------------------------------------------------------------------
+| Credentials
+|--------------------------------------------------------------------------
+|
+| Exported so callers can answer "is streaming available here?" without
+| triggering anything. A route can return a clean "not configured on this
+| server" instead of letting a request fail deep inside the SDK.
+|
+*/
+
+export const MUX_CONFIGURED = !!(
+  process.env.MUX_TOKEN_ID && process.env.MUX_TOKEN_SECRET
+);
 
 /*
 |--------------------------------------------------------------------------
@@ -59,20 +128,84 @@ const SIGNING_KEY_PRIVATE = process.env.MUX_SIGNING_KEY_PRIVATE || "";
 
 export const SIGNED_PLAYBACK = !!(SIGNING_KEY_ID && SIGNING_KEY_PRIVATE);
 
-const mux = new Mux({
-  tokenId: process.env.MUX_TOKEN_ID,
-  tokenSecret: process.env.MUX_TOKEN_SECRET,
+/*
+|--------------------------------------------------------------------------
+| The Client
+|--------------------------------------------------------------------------
+|
+| Built on first property access rather than at import.
+|
+| The Proxy is what keeps this a drop-in change: every call site already
+| reads `import mux from "../../config/mux"` and then `mux.video.liveStreams
+| .create(...)`. Exporting a getMux() function instead would have meant
+| editing liveStream.service, muxWebhook.controller and both jobs, and each
+| of those edits is a chance to miss one.
+|
+| The error is an AppError so it travels through the global handler as
+| { success, message } with a 503, the same shape the app parses everywhere
+| else - not an unhandled crash.
+|
+*/
 
-  /*
-  | The SDK reads these for jwt.signPlaybackId. Null rather than "" so it
-  | fails with "no signing key" instead of "invalid key".
-  */
+let client: Mux | null = null;
 
-  jwtSigningKey: SIGNING_KEY_ID || null,
-  jwtPrivateKey: SIGNING_KEY_PRIVATE || null,
+const getClient = (): Mux => {
+  if (client) return client;
+
+  if (!MUX_CONFIGURED) {
+    throw new AppError(
+      "Live streaming is not configured on this server. " +
+        "MUX_TOKEN_ID and MUX_TOKEN_SECRET are missing from the " +
+        "environment (.env locally, the host's environment settings when " +
+        "deployed).",
+      503,
+    );
+  }
+
+  client = new Mux({
+    tokenId: process.env.MUX_TOKEN_ID,
+    tokenSecret: process.env.MUX_TOKEN_SECRET,
+
+    /*
+    | The SDK reads these for jwt.signPlaybackId. Null rather than "" so it
+    | fails with "no signing key" instead of "invalid key".
+    */
+
+    jwtSigningKey: SIGNING_KEY_ID || null,
+    jwtPrivateKey: SIGNING_KEY_PRIVATE || null,
+  });
+
+  return client;
+};
+
+const mux = new Proxy({} as Mux, {
+  get: (_target, prop, receiver) => {
+    const value = Reflect.get(getClient() as object, prop, receiver);
+
+    /* Methods need their original `this`, so hand back a bound copy. */
+    return typeof value === "function" ? value.bind(getClient()) : value;
+  },
 });
 
-if (!SIGNED_PLAYBACK) {
+export default mux;
+
+/*
+|--------------------------------------------------------------------------
+| Boot Diagnostics
+|--------------------------------------------------------------------------
+|
+| Said once, at boot, rather than discovered at the ground. Neither line
+| stops the server - they describe what streaming will and will not do.
+|
+*/
+
+if (!MUX_CONFIGURED) {
+  console.warn(
+    "[mux] MUX_TOKEN_ID / MUX_TOKEN_SECRET not set - live streaming is " +
+      "DISABLED. Every other feature works normally; streaming endpoints " +
+      "will answer 503 until the credentials are added.",
+  );
+} else if (!SIGNED_PLAYBACK) {
   console.warn(
     "[mux] MUX_SIGNING_KEY_ID / MUX_SIGNING_KEY_PRIVATE not set - " +
       "streams will be created with PUBLIC playback. Anyone with the " +
@@ -80,8 +213,6 @@ if (!SIGNED_PLAYBACK) {
       "production.",
   );
 }
-
-export default mux;
 
 export const RTMPS_URL = "rtmps://global-live.mux.com:443/app";
 
@@ -96,9 +227,7 @@ export const RTMPS_URL = "rtmps://global-live.mux.com:443/app";
 |
 */
 
-export const PLAYBACK_TOKEN_MINUTES = Number(
-  process.env.PLAYBACK_TOKEN_MINUTES || 40,
-);
+export const PLAYBACK_TOKEN_MINUTES = num("PLAYBACK_TOKEN_MINUTES", 40);
 
 /*
 |--------------------------------------------------------------------------
@@ -116,9 +245,7 @@ export const PLAYBACK_TOKEN_MINUTES = Number(
 |
 */
 
-export const MAX_VIEWERS_PER_MATCH = Number(
-  process.env.MAX_VIEWERS_PER_MATCH || 200,
-);
+export const MAX_VIEWERS_PER_MATCH = num("MAX_VIEWERS_PER_MATCH", 200);
 
 export type StreamAngle = "front" | "third";
 
@@ -153,9 +280,7 @@ export const ANGLES: StreamAngle[] = ["front", "third"];
 |
 */
 
-export const RECONNECT_WINDOW_SECONDS = Number(
-  process.env.MUX_RECONNECT_WINDOW || 180,
-);
+export const RECONNECT_WINDOW_SECONDS = num("MUX_RECONNECT_WINDOW", 180);
 
 /*
 |--------------------------------------------------------------------------
@@ -187,21 +312,13 @@ export const RECONNECT_WINDOW_SECONDS = Number(
 |
 */
 
-export const MATCH_COMPLETE_GRACE_MINUTES = Number(
-  process.env.STREAM_GRACE_MINUTES || 10,
-);
+export const MATCH_COMPLETE_GRACE_MINUTES = num("STREAM_GRACE_MINUTES", 10);
 
-export const IDLE_WARN_MINUTES = Number(
-  process.env.STREAM_IDLE_WARN_MINUTES || 20,
-);
+export const IDLE_WARN_MINUTES = num("STREAM_IDLE_WARN_MINUTES", 20);
 
-export const IDLE_END_MINUTES = Number(
-  process.env.STREAM_IDLE_END_MINUTES || 30,
-);
+export const IDLE_END_MINUTES = num("STREAM_IDLE_END_MINUTES", 30);
 
-export const HARD_CAP_HOURS = Number(
-  process.env.STREAM_HARD_CAP_HOURS || 6,
-);
+export const HARD_CAP_HOURS = num("STREAM_HARD_CAP_HOURS", 6);
 
 /*
 |--------------------------------------------------------------------------
@@ -245,10 +362,6 @@ export const HARD_CAP_HOURS = Number(
 export const KEEP_RECORDINGS =
   String(process.env.KEEP_RECORDINGS || "false").toLowerCase() === "true";
 
-export const RECORDING_RETENTION_DAYS = Number(
-  process.env.RECORDING_RETENTION_DAYS || 7,
-);
+export const RECORDING_RETENTION_DAYS = num("RECORDING_RETENTION_DAYS", 7);
 
-export const RECORDING_WARN_DAYS_BEFORE = Number(
-  process.env.RECORDING_WARN_DAYS_BEFORE || 2,
-);
+export const RECORDING_WARN_DAYS_BEFORE = num("RECORDING_WARN_DAYS_BEFORE", 2);
