@@ -3,6 +3,7 @@ import { Router } from "express";
 import {
   sendInvitation,
   getMyInvitations,
+  getTeamInvitations,
   acceptInvitation,
   rejectInvitation,
   cancelInvitation,
@@ -39,6 +40,26 @@ router.get(
   "/my",
   authMiddleware,
   getMyInvitations
+);
+
+/*
+|--------------------------------------------------------------------------
+| Team Invitations
+|--------------------------------------------------------------------------
+|
+| Everything this team has sent, with status. Optional ?status=PENDING.
+|
+| Registered above "/:id/..." for the same reason /name-available sits above
+| /:id on the teams router - Express matches in order, and a literal
+| segment must be declared before the parameterised one that would swallow
+| it.
+|
+*/
+
+router.get(
+  "/team/:teamId",
+  authMiddleware,
+  getTeamInvitations
 );
 
 /*

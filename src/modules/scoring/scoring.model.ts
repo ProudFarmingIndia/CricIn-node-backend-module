@@ -229,4 +229,30 @@ const scoringSchema = new mongoose.Schema(
   },
 );
 
+/*
+|--------------------------------------------------------------------------
+| Timestamp Indexes - For The Broadcast Overlay
+|--------------------------------------------------------------------------
+|
+| The live video runs 12-20 seconds behind real life, so the overlay can
+| never render the current score - it would announce a wicket while the
+| viewer is still watching the bowler run in. Instead it asks, roughly
+| once a second, "what was the state at THIS moment", and that question is
+| answered by reading these rows with a createdAt cutoff.
+|
+| Every ball already carries createdAt from `timestamps: true` above, so
+| no new field and no second collection was needed - but without an index
+| on it, every one of those requests is a collection scan on the one
+| collection that grows with every delivery of every match ever played.
+|
+| Both compound: inningsId for the overlay itself, matchId for the
+| draft-cleanup job and anything that counts a match's balls without
+| knowing its innings.
+|
+*/
+
+scoringSchema.index({ inningsId: 1, createdAt: 1 });
+
+scoringSchema.index({ matchId: 1, createdAt: 1 });
+
 export default mongoose.model("Scoring", scoringSchema);

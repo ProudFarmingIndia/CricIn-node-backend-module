@@ -6,6 +6,7 @@ import {
   getMyTeams,
   getAllTeams,
   getTeamById,
+  checkTeamNames,
   updateTeam,
   deleteTeam,
   addPlayerToTeam,
@@ -55,6 +56,18 @@ router.get(
   "/all",
   authMiddleware,
   getAllTeams
+);
+
+/*
+| MUST stay above "/:id". Express matches in registration order, so with
+| "/:id" first a request for /api/teams/name-available is handled by
+| getTeamById with id="name-available" - which returns "Team not found"
+| and looks like the endpoint was never added.
+*/
+router.get(
+  "/name-available",
+  authMiddleware,
+  checkTeamNames
 );
 
 router.get(

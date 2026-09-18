@@ -220,8 +220,99 @@ export const getMyInvitations = async (userId: string) => {
 |--------------------------------------------------------------------------
 */
 
+/*
+|--------------------------------------------------------------------------
+| Who is allowed to answer an invitation?
+|--------------------------------------------------------------------------
+|
+| accept, reject and cancel used to take ONLY an invitation id. No caller
+| identity, no check. Any authenticated user who knew - or guessed - an id
+| could accept somebody else's invitation, join a team they were never
+| asked to join, or cancel a captain's outstanding invite.
+|
+| The rule is simple and different for each side:
+|
+|   ACCEPT / REJECT belong to the INVITEE. Only the player the invitation
+|   was sent to can answer it.
+|
+|   CANCEL belongs to the TEAM. Whoever could have sent the invitation can
+|   withdraw it - owner, captain, or a vice-captain with canSendInvitations.
+*/
+
+const assertIsInvitee = async (invitation: any, userId: string) => {
+  const player = await Player.findOne({ userId });
+
+  if (!player) {
+    throw new Error("Player profile not found.");
+  }
+
+  /*
+  | playerId may be populated or a bare ObjectId depending on the caller,
+  | so compare on the id either way rather than assuming one shape.
+  */
+  const inviteeId = String(invitation.playerId?._id || invitation.playerId);
+
+  if (inviteeId !== String(player._id)) {
+    throw new Error("This invitation was not sent to you.");
+  }
+};
+
+/*
+|--------------------------------------------------------------------------
+| Every invitation for a team, whatever its status
+|--------------------------------------------------------------------------
+|
+| getMyInvitations answers "what have I been invited to" - scoped to the
+| invitee, hardcoded to PENDING. There was no way for a CAPTAIN to see the
+| invitations their own team had sent, which is what the squad list needs
+| in order to show a player as pending rather than silently missing.
+|
+| Guarded by assertCanSendInvitations: if you cannot send an invitation for
+| this team, you have no business reading its list either.
+|
+| The schema already carries `invitationSchema.index({ teamId: 1 })`, so
+| this query was anticipated - it just had no route.
+*/
+
+export const getTeamInvitations = async (
+  userId: string,
+  teamId: string,
+  status?: string,
+) => {
+  const team = await Team.findById(teamId);
+
+  if (!team) {
+    throw new Error("Team not found.");
+  }
+
+  await assertCanSendInvitations(team, userId);
+
+  const query: any = { teamId };
+
+  /*
+  | An explicit status filter is optional. Without one the caller gets
+  | everything - which is what the squad list wants, because it needs to
+  | distinguish "pending" from "rejected" from "never invited".
+  */
+  if (status) {
+    query.status = String(status).toUpperCase();
+  }
+
+  return await Invitation.find(query)
+    .populate({
+      path: "playerId",
+      populate: { path: "userId" },
+    })
+    .populate({
+      path: "invitedBy",
+      populate: { path: "userId" },
+    })
+    .sort({ createdAt: -1 });
+};
+
 export const acceptInvitation = async (
   invitationId: string,
+  userId?: string,
 ) => {
   const session = await mongoose.startSession();
 
@@ -253,6 +344,10 @@ export const acceptInvitation = async (
     if (!invitation) {
       throw new Error("Invitation not found.");
     }
+
+
+    /* Only the invitee may accept - see assertIsInvitee above. */
+    if (userId) await assertIsInvitee(invitation, userId);
 
     if (invitation.status !== "PENDING") {
       throw new Error("Invitation already processed.");
@@ -512,7 +607,10 @@ export const acceptInvitation = async (
 |--------------------------------------------------------------------------
 */
 
-export const rejectInvitation = async (invitationId: string) => {
+export const rejectInvitation = async (
+  invitationId: string,
+  userId?: string,
+) => {
   const invitation = await Invitation.findById(invitationId)
     .populate("teamId")
     .populate({
@@ -531,6 +629,10 @@ export const rejectInvitation = async (invitationId: string) => {
   if (!invitation) {
     throw new Error("Invitation not found.");
   }
+
+
+  /* Only the invitee may reject. */
+  if (userId) await assertIsInvitee(invitation, userId);
 
   if (invitation.status !== "PENDING") {
     throw new Error("Invitation already processed.");
@@ -616,7 +718,10 @@ export const rejectInvitation = async (invitationId: string) => {
 |--------------------------------------------------------------------------
 */
 
-export const cancelInvitation = async (invitationId: string) => {
+export const cancelInvitation = async (
+  invitationId: string,
+  userId?: string,
+) => {
   const invitation = await Invitation.findById(invitationId)
     .populate("teamId")
     .populate({
@@ -634,6 +739,16 @@ export const cancelInvitation = async (invitationId: string) => {
 
   if (!invitation) {
     throw new Error("Invitation not found.");
+  }
+
+
+  /* Only the team side may withdraw an invitation it sent. */
+  if (userId) {
+    const team = await Team.findById(
+      invitation.teamId?._id || invitation.teamId,
+    );
+
+    if (team) await assertCanSendInvitations(team, userId);
   }
 
   if (invitation.status !== "PENDING") {

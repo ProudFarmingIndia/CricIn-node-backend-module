@@ -5,13 +5,12 @@
   "scripts": {
     "dev": "nodemon",
     "build": "tsc",
-
     "_comment_start": "start COMPILES FIRST. It used to be plain `node dist/server.js`, which happily served a dist/ build that was days older than src/ - so source changes appeared to do nothing at all, and restarting only re-ran the same stale JavaScript. Building first makes that impossible.",
-
     "start": "npm run build && node dist/server.js",
     "start:nobuild": "node dist/server.js"
   },
   "dependencies": {
+    "@mux/mux-node": "^15.1.0",
     "axios": "^1.17.0",
     "bcryptjs": "^3.0.3",
     "cloudinary": "^2.10.0",

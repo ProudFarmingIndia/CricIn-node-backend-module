@@ -50,11 +50,18 @@ export const setNextBowler = async (req: AuthRequest, res: Response) => {
 
 export const setNextBatsman = async (req: AuthRequest, res: Response) => {
   try {
-    const { inningsId, playerId } = req.body;
+    /*
+    | `end` is optional: "striker" | "nonStriker". Omitted for an incoming
+    | batter (the service fills the vacant end); sent explicitly for a
+    | correction, where the scorer knows which end they mis-tapped.
+    */
+    const { inningsId, playerId, end } = req.body;
+
     const data = await ScoringService.setNextBatsman(
       inningsId,
       playerId,
       req.user.userId,
+      end,
     );
     res.status(200).json({ success: true, data });
   } catch (error: any) {

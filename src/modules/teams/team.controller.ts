@@ -491,3 +491,40 @@ export const createLocalPlayer = async (
     });
   }
 };
+/*
+|--------------------------------------------------------------------------
+| Check Team Name / Short Name Availability
+|--------------------------------------------------------------------------
+|
+| GET /api/teams/name-available?teamName=Delhi%20Warriors&shortName=DW
+|
+| Optional `excludeTeamId` so the edit screen does not report a team's own
+| name as taken.
+|
+| Always 200, even when a name is unavailable. "That name is taken" is a
+| successful answer to the question asked, not an error - and the app polls
+| this on every keystroke, so a 400 here would fill the console with noise
+| and trip any global error toast the client has.
+*/
+
+export const checkTeamNames = async (req: AuthRequest, res: Response) => {
+  try {
+    const { teamName, shortName, excludeTeamId } = req.query;
+
+    const result = await TeamService.checkNameAvailability(
+      teamName === undefined ? undefined : String(teamName),
+      shortName === undefined ? undefined : String(shortName),
+      excludeTeamId ? String(excludeTeamId) : undefined,
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: result,
+    });
+  } catch (error: any) {
+    return res.status(400).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
