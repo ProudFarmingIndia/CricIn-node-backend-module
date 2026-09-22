@@ -38,6 +38,15 @@ import AppError from "../../shared/errors/AppError";
 import { HTTP_STATUS } from "../../shared/constants/httpStatus";
 
 /*
+| Every Match needs its two PINs, whoever creates it. They used to be
+| generated only inside match.service.createMatch, which this file does not
+| go through - so every tournament fixture came out with null PINs, the
+| start-match gate found nothing to check, and the organizer could start a
+| game neither captain had agreed to.
+*/
+import { newMatchPins } from "../../shared/utils/matchPin";
+
+/*
 |--------------------------------------------------------------------------
 | Round Robin - the circle method
 |--------------------------------------------------------------------------
@@ -497,6 +506,14 @@ export const generateFixtures = async (tournamentId: string) => {
 
       teamA: p.a ? new mongoose.Types.ObjectId(p.a) : undefined,
       teamB: p.b ? new mongoose.Types.ObjectId(p.b) : undefined,
+
+      /*
+      | Generated even for a playoff placeholder whose teams are not known
+      | yet. The PIN belongs to the SLOT, not to whoever eventually fills
+      | it - so when the bracket resolves, both captains already have a
+      | code waiting rather than needing one minted at kick-off.
+      */
+      ...newMatchPins(),
 
       status: isPlaceholder ? "draft" : "upcoming",
 

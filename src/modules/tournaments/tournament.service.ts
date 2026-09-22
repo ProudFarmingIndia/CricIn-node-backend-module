@@ -165,13 +165,39 @@ export const createTournament = async (userId: string, payload: any) => {
 
   assertAwardsValid(awards);
 
+  /*
+  |--------------------------------------------------------------------------
+  | status vs isPublished
+  |--------------------------------------------------------------------------
+  |
+  | These two are NOT independent, and treating them as such is how a
+  | tournament ends up invisible with its Publish switch already on.
+  |
+  | The create form sends the whole form object, `isPublished` included. So
+  | `{ ...payload, status: "draft" }` used to write isPublished:true next to
+  | status:"draft" - and listTournaments matches on STATUS
+  | ($in ["published","registration_closed"]), so the tournament appeared
+  | on nobody's home screen. Worse, the only code that promotes draft ->
+  | published is setVisibility, which runs when the switch CHANGES. The
+  | switch was already on, so the organizer had no way to fix it except
+  | turning it off and on again.
+  |
+  | So publish intent at create time is honoured here, with the same
+  | one-ground rule setVisibility enforces - a published tournament nobody
+  | can find a venue for is not a tournament.
+  */
+
+  const wantsPublished =
+    !!payload.isPublished && (payload.grounds?.length ?? 0) > 0;
+
   const tournament = await Tournament.create({
     ...payload,
     prizes,
     awards,
     prizePool: poolOf(prizes, awards),
     userId,
-    status: "draft",
+    isPublished: wantsPublished,
+    status: wantsPublished ? "published" : "draft",
   });
 
   return tournament;
@@ -244,7 +270,31 @@ export const updateTournament = async (
 
   if (payload.awards) assertAwardsValid(payload.awards);
 
+  /*
+  | `status` and `userId` are not editable fields, whatever the payload
+  | says. The edit form reuses the create form and posts the whole object
+  | back, so this is not a hypothetical attack - it is the normal path.
+  */
+
+  delete payload.status;
+  delete payload.userId;
+
   Object.assign(tournament, payload);
+
+  /*
+  | Same draft/published pairing as createTournament. An edit that flips
+  | isPublished on must move a draft forward, otherwise the tournament is
+  | published-but-invisible and the switch is already on, leaving nothing
+  | left to toggle. See the long note in createTournament.
+  */
+
+  if (
+    tournament.isPublished &&
+    tournament.status === "draft" &&
+    tournament.grounds?.length
+  ) {
+    tournament.status = "published";
+  }
 
   /*
   | Recomputed from whatever the tournament holds AFTER the assign, not
@@ -1242,6 +1292,61 @@ const withCounts = async (list: any[], userId: string) => {
   }));
 };
 
+/*
+|--------------------------------------------------------------------------
+| Teams this user is the captain OF
+|--------------------------------------------------------------------------
+|
+| Not "teams they are in" - captaincy specifically, because only a captain
+| may enter a team into a tournament (see requestToJoin).
+|
+| Captaincy is stored two ways and both are load-bearing:
+|
+|   team.captainId -> a Player document, which may or may not be linked
+|                     to a user account
+|   team.userId    -> whoever created the team
+|
+| requestToJoin resolves it as `captainPlayer.userId || team.userId`, and
+| this function MUST resolve it identically. If it were looser, the app
+| would offer a team in the picker that the server then refuses with 403 -
+| the worst kind of bug, because the user did nothing wrong.
+|
+*/
+
+const teamsCaptainedBy = async (userId: string) => {
+  const myPlayer: any = await Player.findOne({ userId }).select("_id").lean();
+
+  const or: any[] = [{ userId }];
+
+  if (myPlayer) or.push({ captainId: myPlayer._id });
+
+  const teams: any[] = await Team.find({ $or: or })
+    .select("teamName logo captainId userId")
+    .lean();
+
+  if (!teams.length) return [];
+
+  const captainIds = teams.map((t) => t.captainId).filter(Boolean);
+
+  const captains: any[] = captainIds.length
+    ? await Player.find({ _id: { $in: captainIds } })
+        .select("userId")
+        .lean()
+    : [];
+
+  const captainUserOf = new Map(
+    captains.map((c) => [String(c._id), String(c.userId ?? "")]),
+  );
+
+  return teams.filter((t) => {
+    const resolved =
+      (t.captainId ? captainUserOf.get(String(t.captainId)) : "") ||
+      String(t.userId ?? "");
+
+    return resolved === String(userId);
+  });
+};
+
 export const getTournamentById = async (
   tournamentId: string,
   userId?: string,
@@ -1320,13 +1425,75 @@ export const getTournamentById = async (
   /*
   | A pending invite addressed to THIS user is surfaced at the top level so
   | the detail screen can show the accept strip without a second request.
+  |
+  | "invited" ONLY. A "requested" entry is this user's own application
+  | waiting on the organizer - it used to be lumped in here, which made the
+  | screen tell a captain who had just applied that they had "received an
+  | invite" and offer them an Accept button for their own request. Those
+  | are opposite directions and they get separate fields.
   */
 
   const myPendingInvite = entries.find(
     (e) =>
-      String(e.captainUserId) === String(userId) &&
-      ["invited", "requested"].includes(e.status),
+      String(e.captainUserId) === String(userId) && e.status === "invited",
   );
+
+  /*
+  |--------------------------------------------------------------------------
+  | Can this person put a team in
+  |--------------------------------------------------------------------------
+  |
+  | Every condition the server will check in requestToJoin, checked here
+  | too, so the app can show the right thing instead of a button that
+  | fails. A captain often holds several teams, so the answer is a LIST
+  | and the picker asks which one - that choice cannot be guessed.
+  |
+  | Teams already invited, already applied or already in are filtered out.
+  | A DECLINED team stays in the list on purpose: an organizer who rejected
+  | a side by mistake, or a side that sorted out its availability, should
+  | be able to try again - requestToJoin upserts on (tournament, team), so
+  | the re-application overwrites the old row rather than duplicating it.
+  |
+  */
+
+  const engagedTeamIds = new Set(
+    entries
+      .filter((e) => ["invited", "requested", "accepted"].includes(e.status))
+      .map((e) => String(e.teamId?._id ?? e.teamId)),
+  );
+
+  const canParticipate =
+    !!userId &&
+    !isOrganizer &&
+    !!tournament.publicParticipation &&
+    !tournament.fixturesGeneratedAt &&
+    accepted.length < (tournament.maxTeams ?? 0);
+
+  let myJoinableTeams: any[] = [];
+
+  if (canParticipate) {
+    const mine = await teamsCaptainedBy(String(userId));
+
+    myJoinableTeams = mine
+      .filter((t) => !engagedTeamIds.has(String(t._id)))
+      .map((t) => ({
+        teamId: t._id,
+        teamName: t.teamName ?? "Team",
+        logo: t.logo ?? null,
+      }));
+  }
+
+  /* This user's own applications still waiting on the organizer. */
+
+  const myJoinRequests = entries
+    .filter(
+      (e) =>
+        String(e.captainUserId) === String(userId) && e.status === "requested",
+    )
+    .map((e) => ({
+      teamId: e.teamId?._id ?? e.teamId,
+      teamName: e.teamId?.teamName ?? "Team",
+    }));
 
   return {
     ...tournament,
@@ -1386,6 +1553,19 @@ export const getTournamentById = async (
         squadSize: e.squad?.length ?? 0,
         squadLocked: !!e.squadLockedAt,
       })),
+
+    /*
+    | The apply flow. `canRequestJoin` is the single question the screen
+    | asks before drawing the strip - it is false when the tournament is
+    | invite-only, when fixtures are out, when it is full, when this user
+    | organizes it, and when they captain no team that is not already in.
+    */
+
+    canRequestJoin: canParticipate && myJoinableTeams.length > 0,
+
+    myJoinableTeams,
+
+    myJoinRequests,
 
     acceptedCount: accepted.length,
   };

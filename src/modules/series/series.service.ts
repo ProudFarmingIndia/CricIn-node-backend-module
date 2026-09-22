@@ -60,6 +60,77 @@ import { awardMetric, MIN_MATCHES, MAX_MATCHES } from "./series.constants";
 import AppError from "../../shared/errors/AppError";
 import { HTTP_STATUS } from "../../shared/constants/httpStatus";
 
+/* Same reason as fixtures.service - see shared/utils/matchPin.ts. */
+import { newMatchPins } from "../../shared/utils/matchPin";
+
+/*
+|--------------------------------------------------------------------------
+| Player ids vs user ids
+|--------------------------------------------------------------------------
+|
+| Team.captainId and Team.viceCaptainId point at PLAYER documents, not at
+| user accounts. A Player may or may not be linked to a login - a captain
+| entered by name from a contact list has no user id at all.
+|
+| Comparing either of them to a session's userId is therefore always false,
+| and every one of the three helpers below exists because that comparison
+| was being made directly. It broke the series module end to end:
+|
+|   inviteOpponent stored captainId in opponentCaptainUserId (a ref: User
+|   field), so the invite notification went to an id no user has and
+|   respondToInvite refused the real captain with 403. opponentStatus
+|   could never leave "pending", so generateFixtures always refused, so a
+|   series never produced a single match.
+|
+| Team.userId - whoever created the team - is the fallback, and it IS a
+| user id. The tournament module resolves captaincy the same way; these
+| helpers keep the two modules answering the question identically.
+|
+*/
+
+/* The user account behind a team's captain, "" if there is none. */
+
+const captainUserIdOf = async (team: any): Promise<string> => {
+  if (!team) return "";
+
+  const captain: any = team.captainId
+    ? await Player.findById(team.captainId).select("userId").lean()
+    : null;
+
+  return String(captain?.userId || team.userId || "");
+};
+
+/*
+| Captain, vice-captain or the person who created the team. Used for "may
+| this user act for this team", which is a wider question than "who
+| receives the invite" - a vice-captain can set a series up, but the
+| invite still goes to the captain alone.
+*/
+
+const runsTeam = async (team: any, userId: string): Promise<boolean> => {
+  if (!team) return false;
+
+  if (String(team.userId ?? "") === String(userId)) return true;
+
+  const ids = [team.captainId, team.viceCaptainId].filter(Boolean);
+
+  if (!ids.length) return false;
+
+  const players: any[] = await Player.find({ _id: { $in: ids } })
+    .select("userId")
+    .lean();
+
+  return players.some((p) => String(p.userId ?? "") === String(userId));
+};
+
+/* This user's own Player document id, or null if they have no profile. */
+
+const myPlayerId = async (userId: string) => {
+  const me: any = await Player.findOne({ userId }).select("_id").lean();
+
+  return me?._id ?? null;
+};
+
 /*
 |--------------------------------------------------------------------------
 | The subscription gate
@@ -167,12 +238,15 @@ export const createSeries = async (userId: string, payload: any) => {
     throw new AppError("Team nahi mili.", HTTP_STATUS.NOT_FOUND);
   }
 
-  const runsTeam =
-    String(team.captainId) === String(userId) ||
-    String(team.userId) === String(userId) ||
-    String(team.viceCaptainId) === String(userId);
+  /*
+  | captainId / viceCaptainId are Player ids - see the note at the top of
+  | this file. Compared directly they never matched, so only the team's
+  | creator could ever open a series: a captain who did not create the
+  | team was refused with "tum is team ke captain nahi ho", which is the
+  | one thing they definitely were.
+  */
 
-  if (!runsTeam) {
+  if (!(await runsTeam(team, userId))) {
     throw new AppError(
       "Series sirf apni team ke liye bana sakte ho — tum is team ke captain nahi ho.",
       HTTP_STATUS.FORBIDDEN,
@@ -201,6 +275,25 @@ export const createSeries = async (userId: string, payload: any) => {
   | team into a series without ever asking them.
   */
 
+  /*
+  |--------------------------------------------------------------------------
+  | status vs isPublished
+  |--------------------------------------------------------------------------
+  |
+  | These two are NOT independent. The create form posts the whole form
+  | object, `isPublished` included, so `{ ...payload, status: "draft" }`
+  | wrote isPublished:true next to status:"draft" - and listSeries matches
+  | on STATUS ($in ["published","scheduled"]), so the series appeared on
+  | nobody's home screen. The only code that promotes draft -> published is
+  | setVisibility, which runs when the switch CHANGES; the switch was
+  | already on, leaving the organizer nothing to toggle.
+  |
+  | Same fix and the same one-ground rule as the tournament module.
+  */
+
+  const wantsPublished =
+    !!payload.isPublished && (payload.grounds?.length ?? 0) > 0;
+
   const series = await Series.create({
     ...payload,
     teamB: null,
@@ -210,7 +303,8 @@ export const createSeries = async (userId: string, payload: any) => {
     awards,
     prizePool: poolOf(prizes, awards),
     userId,
-    status: "draft",
+    isPublished: wantsPublished,
+    status: wantsPublished ? "published" : "draft",
   });
 
   return series;
@@ -256,7 +350,30 @@ export const updateSeries = async (
   delete payload.teamB;
   delete payload.opponentStatus;
 
+  /*
+  | Not editable either, whatever the payload says. The edit form reuses
+  | the create form and posts the whole object back, so this is the normal
+  | path and not a hypothetical attack.
+  */
+  delete payload.status;
+  delete payload.userId;
+  delete payload.opponentCaptainUserId;
+
   Object.assign(series, payload);
+
+  /*
+  | Same draft/published pairing as createSeries - an edit that switches
+  | publishing on has to move a draft forward, or the series is
+  | published-but-invisible with its switch already on.
+  */
+
+  if (
+    series.isPublished &&
+    series.status === "draft" &&
+    series.grounds?.length
+  ) {
+    series.status = "published";
+  }
 
   if (payload.prizes || payload.awards) {
     series.prizePool = poolOf(series.prizes, series.awards);
@@ -354,23 +471,57 @@ export const inviteOpponent = async (
   }
 
   const team: any = await Team.findById(teamId)
-    .select("captainId teamName")
+    .select("captainId userId teamName")
     .lean();
 
   if (!team) {
     throw new AppError("Team nahi mili.", HTTP_STATUS.NOT_FOUND);
   }
 
-  if (!team.captainId) {
+  /*
+  |--------------------------------------------------------------------------
+  | The captain's USER account, not their Player id
+  |--------------------------------------------------------------------------
+  |
+  | `opponentCaptainUserId` is declared `ref: "User"` and is compared
+  | against the session's userId in respondToInvite and in getSeriesById.
+  | Storing `team.captainId` here - a Player id - was fatal rather than
+  | cosmetic:
+  |
+  |   the invite notification went to an id no user account has, so the
+  |   opponent captain was never told anything
+  |
+  |   respondToInvite's equality check could never pass, so the real
+  |   captain got 403 "sirf opponent team ka captain hi jawab de sakta hai"
+  |
+  |   opponentStatus stayed "pending" forever, so generateFixtures kept
+  |   refusing with "pehle opponent ka accept aana zaroori hai" and the
+  |   series produced no matches at all
+  |
+  | A Player with no linked login cannot be asked anything, so the team's
+  | creator is the fallback - and if there is neither, the invite is
+  | refused here rather than silently going nowhere.
+  */
+
+  const captainUserId = await captainUserIdOf(team);
+
+  if (!captainUserId) {
     throw new AppError(
-      "Is team ka koi captain nahi hai — invite kis ko bheje?",
+      "Is team ka captain kisi CricIn account se juda nahi hai — invite kis ko bheje? Pehle captain assign karwao.",
+      HTTP_STATUS.BAD_REQUEST,
+    );
+  }
+
+  if (String(captainUserId) === String(userId)) {
+    throw new AppError(
+      "Khud ko invite nahi bhej sakte — doosri team ka captain chuno.",
       HTTP_STATUS.BAD_REQUEST,
     );
   }
 
   series.teamB = new mongoose.Types.ObjectId(teamId);
 
-  series.opponentCaptainUserId = team.captainId;
+  series.opponentCaptainUserId = new mongoose.Types.ObjectId(captainUserId);
 
   series.opponentStatus = "pending";
 
@@ -381,7 +532,7 @@ export const inviteOpponent = async (
   const mine: any = await Team.findById(series.teamA).select("teamName").lean();
 
   await createNotification({
-    receiverId: String(team.captainId),
+    receiverId: String(captainUserId),
     actorId: String(userId),
     type: NOTIFICATION_TYPES.SERIES_INVITE_RECEIVED,
     title: "Series invite",
@@ -594,6 +745,9 @@ export const generateFixtures = async (seriesId: string, userId: string) => {
 
       teamA: series.teamA,
       teamB: series.teamB,
+
+      /* Both captains get a code the moment the schedule exists. */
+      ...newMatchPins(),
 
       status: "upcoming",
 
@@ -970,9 +1124,28 @@ export const listSeries = async (userId: string, filter: string) => {
   */
 
   if (filter === "mine") {
-    const myTeams: any[] = await Team.find({
-      $or: [{ captainId: userId }, { userId }, { viceCaptainId: userId }],
-    })
+    /*
+    | captainId / viceCaptainId hold PLAYER ids, so matching them against
+    | userId matched nothing - "mine" only ever found series through
+    | `userId` (teams this person created) and the opponent field. A
+    | captain who did not create their team could not find their own
+    | series. The roster is included too, which is the same answer
+    | getSeriesById gives when it decides who is a participant.
+    */
+
+    const mePlayer = await myPlayerId(userId);
+
+    const teamOr: any[] = [{ userId }];
+
+    if (mePlayer) {
+      teamOr.push(
+        { captainId: mePlayer },
+        { viceCaptainId: mePlayer },
+        { players: mePlayer },
+      );
+    }
+
+    const myTeams: any[] = await Team.find({ $or: teamOr })
       .select("_id")
       .lean();
 
@@ -1007,8 +1180,8 @@ export const listSeries = async (userId: string, filter: string) => {
 export const getSeriesById = async (seriesId: string, userId?: string) => {
   const series: any = await Series.findById(seriesId)
     .populate("userId", "name phone")
-    .populate("teamA", "teamName logo captainId")
-    .populate("teamB", "teamName logo captainId")
+    .populate("teamA", "teamName logo captainId userId")
+    .populate("teamB", "teamName logo captainId userId")
     .populate("winnerTeam", "teamName logo")
     .lean();
 
@@ -1037,15 +1210,26 @@ export const getSeriesById = async (seriesId: string, userId?: string) => {
   |
   */
 
-  const captainIds = [
-    series.teamA?.captainId,
-    series.teamB?.captainId,
-    series.opponentCaptainUserId,
-  ]
-    .filter(Boolean)
-    .map(String);
+  /*
+  | teamA.captainId and teamB.captainId are PLAYER ids and were being
+  | compared to a user id, so the captain of either side was never
+  | recognised - they were handed myRole "player" (or "viewer" if they were
+  | not on the roster) and the screen drew them the read-only version of
+  | their own series. Both are resolved to user accounts first now.
+  */
 
-  const isCaptainHere = captainIds.includes(String(userId));
+  const [captainA, captainB] = await Promise.all([
+    captainUserIdOf(series.teamA),
+    captainUserIdOf(series.teamB),
+  ]);
+
+  const captainUserIds = [
+    captainA,
+    captainB,
+    series.opponentCaptainUserId ? String(series.opponentCaptainUserId) : "",
+  ].filter(Boolean);
+
+  const isCaptainHere = !!userId && captainUserIds.includes(String(userId));
 
   let isSquadMember = false;
 

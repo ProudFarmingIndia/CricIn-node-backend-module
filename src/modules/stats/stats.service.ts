@@ -782,7 +782,18 @@ export const getTeamRankings = async (options: {
   minMatches?: number;
   limit?: number;
 }) => {
-  const limit = Math.min(Math.max(options.limit || 25, 1), 100);
+  /*
+  | Cap raised from 100 because this endpoint now also backs the Teams
+  | directory, where the honest answer is "every team", not "the top 100".
+  | Still capped so one request cannot pull the whole collection.
+  */
+
+  const limit = Math.min(Math.max(options.limit || 25, 1), 200);
+
+  /*
+  | minMatches 0 is the directory mode - every team, played or not. The
+  | default stays 1 so existing callers keep getting a league table.
+  */
 
   const minMatches = options.minMatches ?? 1;
 
@@ -891,18 +902,58 @@ export const getTeamRankings = async (options: {
       };
     })
     .filter((row) => row.played >= minMatches)
-    .sort(
-      (a, b) =>
+    /*
+    |----------------------------------------------------------------------
+    | Played teams first, then the rest
+    |----------------------------------------------------------------------
+    |
+    | With minMatches: 0 this endpoint doubles as the team DIRECTORY, not
+    | just a league table - the Teams tab needs every team that exists, so
+    | a side that has not played yet can still be found and challenged.
+    |
+    | Sorting purely on points would scatter those teams through the middle
+    | of the table, because a team with 0 played and 0 points sorts equal
+    | to a team that has played four and lost four. So anyone with a
+    | completed match is ranked above everyone without one, and the
+    | unplayed teams are listed alphabetically - the only ordering that
+    | means anything when there is no record to compare.
+    */
+    .sort((a, b) => {
+      if (a.played > 0 !== b.played > 0) return a.played > 0 ? -1 : 1;
+
+      if (a.played === 0 && b.played === 0) {
+        return String(a.team.teamName || "").localeCompare(
+          String(b.team.teamName || ""),
+        );
+      }
+
+      return (
         b.points - a.points ||
         b.winPercentage - a.winPercentage ||
-        b.played - a.played,
-    )
+        b.played - a.played
+      );
+    })
     .slice(0, limit);
 
-  return ranked.map((row, index) => ({
-    rank: index + 1,
-    ...row,
-  }));
+  /*
+  | `rank` is only meaningful for teams with a record. An unplayed team
+  | gets rank null rather than a number it did not earn, and the app shows
+  | a dash in that column.
+  */
+
+  let position = 0;
+
+  return ranked.map((row) => {
+    const isRanked = row.played > 0;
+
+    if (isRanked) position += 1;
+
+    return {
+      rank: isRanked ? position : null,
+      isRanked,
+      ...row,
+    };
+  });
 };
 
 /*
