@@ -91,6 +91,82 @@ const canManageTeam = async (team: any, userId: string): Promise<boolean> => {
 
 /*
 |--------------------------------------------------------------------------
+| Is this a fixture somebody else organised?
+|--------------------------------------------------------------------------
+|
+| A match belongs to one of two worlds and they have different rules about
+| who may start it:
+|
+|   CHALLENGE MATCH   two teams agreed to play each other. There is no
+|                     third party. Either captain starts it, and the PIN
+|                     from the other side is the proof both are present.
+|
+|   ORGANISED FIXTURE part of a tournament or a series. Somebody ELSE
+|                     decided this match exists, when it is played and who
+|                     plays it. The organizer - or whoever they handed the
+|                     scoring to - starts it. The captains do not.
+|
+| The distinction is simply whether the match is linked to a tournament or
+| a series, because that link is what says a third party owns the schedule.
+*/
+
+const isOrganizedFixture = (match: any): boolean =>
+  !!(match?.tournamentId || match?.seriesId);
+
+/*
+|--------------------------------------------------------------------------
+| Who may start this match
+|--------------------------------------------------------------------------
+|
+| ONE function, called by BOTH the read that draws the button and the write
+| that starts the match. They were separate before and drifted: the screen
+| showed Start Match to a tournament team's captain, they tapped it, and
+| the server let them - so a group-stage fixture could be started by one
+| side while the organizer was still setting up.
+|
+| For an organised fixture the captains are deliberately excluded. Not
+| because they are untrusted, but because the schedule is not theirs: a
+| captain starting a fixture early puts a live match on the tournament's
+| points table that the organizer never sanctioned, and the result counts.
+|
+| What the captains still hold is the PIN. The organizer manages neither
+| side, so requiredPinSides asks them for BOTH - the match cannot begin
+| until each captain has handed their code over in person. Control of the
+| schedule and proof that both teams are present are different questions,
+| and each stays with the person who should answer it.
+|
+| Note the scorer branch covers the organizer for a normal fixture
+| (fixtures are created with scorerUserId set to the organizer) AND the
+| person they reassigned it to with assignMatchScorer. `match.userId` is
+| checked as well so a fixture created before scorerUserId was recorded is
+| still startable by its organizer.
+*/
+
+const canStartMatch = (
+  match: any,
+  userId: string | undefined,
+  managesTeamA: boolean,
+  managesTeamB: boolean,
+): boolean => {
+  if (!userId) return false;
+
+  const isOwner = String(match?.userId || "") === String(userId);
+
+  if (isOrganizedFixture(match)) {
+    return isOwner || isMatchScorer(match, userId);
+  }
+
+  return (
+    managesTeamA ||
+    managesTeamB ||
+    isOwner ||
+    isMatchScorer(match, userId) ||
+    String(match?.inviteSenderUserId || "") === String(userId)
+  );
+};
+
+/*
+|--------------------------------------------------------------------------
 | Which PINs does this person have to produce?
 |--------------------------------------------------------------------------
 |
@@ -284,14 +360,26 @@ export const getMatchById = async (matchId: string, userId?: string) => {
     | side, so `canManage` was false and the button never rendered. They
     | could open their own tournament's match and had no way to begin it.
     |
-    | This mirrors startMatch's authorisation exactly: either captain, or
-    | the person recorded as the scorer. What the organizer still has to do
-    | is produce both captains' PINs - see pinsRequired - which is the
-    | correct amount of friction, not a wall.
+    | This mirrors startMatch's authorisation exactly - the SAME function
+    | decides both, so the button and the guard cannot disagree.
+    |
+    | On a TOURNAMENT or SERIES fixture the captains are excluded: the
+    | organizer owns the schedule, and a captain starting a fixture on
+    | their own puts a result on somebody else's points table. See
+    | canStartMatch. What the organizer still has to do is produce both
+    | captains' PINs - see pinsRequired - which is the correct amount of
+    | friction, not a wall.
     */
     canStart:
       match.status === "upcoming" &&
-      (canManage || isScorer || String(match.userId) === String(userId)),
+      canStartMatch(match, userId, managesTeamA, managesTeamB),
+
+    /*
+    | So the screen can say WHY there is no button rather than just not
+    | drawing one. A captain opening their tournament fixture should read
+    | "the organizer starts this match", not wonder what is broken.
+    */
+    isOrganizedFixture: isOrganizedFixture(match),
 
     /*
     | Exactly which PINs to collect, with the team names to label the
@@ -496,13 +584,19 @@ export const startMatch = async (
   |
   */
 
-  const isScorer =
-    String(match.userId) === String(userId) ||
-    String(match.scorerUserId || "") === String(userId) ||
-    String(match.inviteSenderUserId || "") === String(userId);
+  /*
+  | The SAME function that decided whether to draw the button. Hiding a
+  | control is not a permission check - a captain of a tournament team
+  | could previously call this endpoint directly and start the fixture even
+  | once the button was gone from their screen.
+  */
 
-  if (!managesTeamA && !managesTeamB && !isScorer) {
-    throw new Error("You are not authorized to start this match.");
+  if (!canStartMatch(match, userId, managesTeamA, managesTeamB)) {
+    throw new Error(
+      isOrganizedFixture(match)
+        ? "Only the organizer (or the scorer they assigned) can start this match."
+        : "You are not authorized to start this match.",
+    );
   }
 
   if (match.status === "live") {
@@ -1767,9 +1861,34 @@ const attachCurrentInnings = async (matches: any[], viewerId?: string) => {
 export const getLiveMatches = async (userId: string) => {
   const teamIds = await getManagedTeamIds(userId);
 
+  /*
+  |--------------------------------------------------------------------------
+  | The scorer is not always in one of the teams
+  |--------------------------------------------------------------------------
+  |
+  | This asked one question - "is a team I manage playing?" - and a TOURNAMENT
+  | OR SERIES ORGANIZER is the answer's blind spot. They run the fixture and
+  | captain neither side, so their own live matches came back empty:
+  |
+  |   nothing on Home under Live
+  |   nothing to resume from after leaving the scoring pad
+  |
+  | ...which is how a scorer ended up with a match live on the ground and no
+  | route back to it anywhere in the app.
+  |
+  | The three added clauses are the same identities isMatchScorer already
+  | recognises, so a match this person can score is a match they can find.
+  */
+
   const matches = await Match.find({
     status: "live",
-    $or: [{ teamA: { $in: teamIds } }, { teamB: { $in: teamIds } }],
+    $or: [
+      { teamA: { $in: teamIds } },
+      { teamB: { $in: teamIds } },
+      { scorerUserId: userId },
+      { userId },
+      { inviteSenderUserId: userId },
+    ],
   })
     .populate("teamA")
     .populate("teamB")

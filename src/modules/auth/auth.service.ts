@@ -74,6 +74,55 @@ const TOKEN_TTL = "30d";
 
 /*
 |--------------------------------------------------------------------------
+| The same limits, while no SMS is being sent
+|--------------------------------------------------------------------------
+|
+| Every number above exists for ONE reason: an SMS costs money and a
+| flooded number is somebody else's phone ringing at 3am. When FIXED_OTP is
+| active neither is true - the code is 123456, nothing leaves the server,
+| and the cost of a send is zero.
+|
+| So the production limits were protecting nothing and blocking QA. Ten
+| logins in a day is nothing when you are testing a login flow; the tester
+| hits "Daily OTP limit reached for this number" and has to wait until
+| tomorrow or edit the database. The 30-second resend gap is worse - it
+| makes a screen that is meant to be tapped through feel broken.
+|
+| They are RAISED, not removed. A runaway retry loop in the app should
+| still trip something loud rather than spin forever, and the shape of the
+| guard stays identical so production behaviour is never a different code
+| path that only runs for real users.
+|
+| The switch is FIXED_OTP, not TESTING_MODE, on purpose: FIXED_OTP is the
+| thing that actually means "no SMS is going out". TESTING_MODE turns it on
+| in production, and locally it is on by default without either flag - both
+| cases want the same relaxed numbers.
+*/
+
+const TEST_IP_LIMIT = 500;
+const TEST_SEND_LIMIT_PER_WINDOW = 1000;
+const TEST_SEND_LIMIT_PER_DAY = 1000;
+const TEST_MIN_RESEND_GAP_MS = 0;
+
+/*
+| FIXED_OTP is declared further down this file. That is fine - this only
+| ever runs inside a request, long after the module has finished loading.
+*/
+
+const limits = () => {
+  const noSms = FIXED_OTP !== null;
+
+  return {
+    noSms,
+    ipLimit: noSms ? TEST_IP_LIMIT : IP_LIMIT,
+    perWindow: noSms ? TEST_SEND_LIMIT_PER_WINDOW : SEND_LIMIT_PER_WINDOW,
+    perDay: noSms ? TEST_SEND_LIMIT_PER_DAY : SEND_LIMIT_PER_DAY,
+    resendGapMs: noSms ? TEST_MIN_RESEND_GAP_MS : MIN_RESEND_GAP_MS,
+  };
+};
+
+/*
+|--------------------------------------------------------------------------
 | Per-IP Throttle
 |--------------------------------------------------------------------------
 |
@@ -120,7 +169,7 @@ const checkIpLimit = (ip?: string) => {
 
   entry.count += 1;
 
-  if (entry.count > IP_LIMIT) {
+  if (entry.count > limits().ipLimit) {
     throw new AppError(
       "Too many requests from this device. Please try again later.",
       429,
@@ -160,11 +209,13 @@ const rollWindows = (user: any, now: number) => {
 const assertWithinSendLimits = (user: any, now: number) => {
   rollWindows(user, now);
 
-  if (user.lastOtpSentAt) {
+  const { perWindow, perDay, resendGapMs } = limits();
+
+  if (resendGapMs > 0 && user.lastOtpSentAt) {
     const since = now - new Date(user.lastOtpSentAt).getTime();
 
-    if (since < MIN_RESEND_GAP_MS) {
-      const wait = Math.ceil((MIN_RESEND_GAP_MS - since) / 1000);
+    if (since < resendGapMs) {
+      const wait = Math.ceil((resendGapMs - since) / 1000);
 
       throw new AppError(
         `Please wait ${wait} more second${wait === 1 ? "" : "s"} before requesting another OTP.`,
@@ -173,7 +224,7 @@ const assertWithinSendLimits = (user: any, now: number) => {
     }
   }
 
-  if ((user.otpSendCount || 0) >= SEND_LIMIT_PER_WINDOW) {
+  if ((user.otpSendCount || 0) >= perWindow) {
     const elapsed = now - new Date(user.otpWindowStartedAt).getTime();
 
     throw new AppError(
@@ -182,7 +233,7 @@ const assertWithinSendLimits = (user: any, now: number) => {
     );
   }
 
-  if ((user.otpDailyCount || 0) >= SEND_LIMIT_PER_DAY) {
+  if ((user.otpDailyCount || 0) >= perDay) {
     throw new AppError(
       "Daily OTP limit reached for this number. Please try again tomorrow.",
       429,
@@ -256,6 +307,43 @@ const TRACE = process.env.NODE_ENV !== "production";
 | means fewer places for the bypass to leak.
 */
 
+/*
+|--------------------------------------------------------------------------
+| TESTING_MODE - the fixed code on a DEPLOYED server, on purpose
+|--------------------------------------------------------------------------
+|
+| Everything above assumes the bypass is a local-only convenience and that
+| NODE_ENV=production is the wall keeping it off a real server. That stays
+| the default.
+|
+| This flag is the deliberate exception. The app is in QA: testers need to
+| log in as any of the seeded numbers without an SMS reaching a phone
+| nobody owns, and they need it on the DEPLOYED server the APK talks to,
+| not only on a laptop.
+|
+| BE CLEAR ABOUT WHAT THIS IS
+|
+| With TESTING_MODE=true, anyone who knows the code owns EVERY account on
+| that server - not "in development", on whatever server this is set on.
+| That is a reasonable trade while the only accounts are seeded test data.
+| It stops being reasonable the moment one real person signs up.
+|
+| It is a SEPARATE variable from DEV_FIXED_OTP on purpose, so that turning
+| it on is a decision someone made in words - not a side effect of
+| forgetting to set NODE_ENV.
+|
+| TO TURN IT OFF: delete TESTING_MODE from the environment (or set it to
+| anything other than "true"). Nothing else needs to change.
+|
+| The app is told as well - see `testingMode` in the send response - so the
+| OTP screen can say plainly that this build is for testing and show the
+| code, instead of leaving a tester staring at an empty box.
+|
+*/
+
+export const TESTING_MODE =
+  String(process.env.TESTING_MODE || "").trim().toLowerCase() === "true";
+
 const FIXED_OTP: string | null = (() => {
   /*
   |----------------------------------------------------------------------
@@ -272,28 +360,46 @@ const FIXED_OTP: string | null = (() => {
   |     DEV_FIXED_OTP=654321     -> 654321, no SMS
   |     DEV_FIXED_OTP=off        -> real random OTPs over MSG91
   |
-  | Production is untouched by all three: the guard below runs first and
-  | refuses unconditionally.
+  | Production is untouched by all three UNLESS TESTING_MODE=true. Without
+  | that flag the guard below refuses unconditionally.
   */
 
-  const raw = String(
+  let raw = String(
     process.env.DEV_FIXED_OTP === undefined
       ? "123456"
       : process.env.DEV_FIXED_OTP,
   ).trim();
 
-  /* An explicit opt-out, for testing the real MSG91 path locally. */
+  /*
+  | An explicit opt-out, for testing the real MSG91 path.
+  |
+  | TESTING_MODE wins over it. The two say opposite things, and the one
+  | that was typed as a whole-server decision beats the one that reads like
+  | a leftover - but say so out loud, because a contradiction in .env that
+  | resolves silently is how someone ends up debugging the wrong half.
+  */
   if (/^(off|false|0|no|none|disabled)$/i.test(raw)) {
-    console.warn(
-      "[auth] DEV_FIXED_OTP is off - real OTPs will be sent via MSG91.",
-    );
+    if (TESTING_MODE) {
+      console.warn(
+        "\n[auth] TESTING_MODE=true and DEV_FIXED_OTP=off contradict each other.\n" +
+          "[auth] TESTING_MODE wins - the fixed code stays ON at 123456.\n" +
+          "[auth] Remove DEV_FIXED_OTP from .env to silence this.\n",
+      );
 
-    return null;
+      /* "off" is not a code. Fall through with the default one. */
+      raw = "123456";
+    } else {
+      console.warn(
+        "[auth] DEV_FIXED_OTP is off - real OTPs will be sent via MSG91.",
+      );
+
+      return null;
+    }
   }
 
   if (!raw) return null;
 
-  if (process.env.NODE_ENV === "production") {
+  if (process.env.NODE_ENV === "production" && !TESTING_MODE) {
     /*
     | Silent unless it was set deliberately - on a correctly configured
     | production server this is simply the normal path, not an incident.
@@ -323,11 +429,20 @@ const FIXED_OTP: string | null = (() => {
       `[auth] FIXED OTP ACTIVE - EVERY number logs in with  ${raw}\n` +
       "[auth] No SMS is sent. This is a COMPLETE AUTH BYPASS.\n" +
       "[auth]\n" +
-      `[auth] NODE_ENV is "${process.env.NODE_ENV || "(unset)"}". This is only\n` +
-      "[auth] disabled when NODE_ENV=production - make sure your deployed\n" +
-      "[auth] server sets it.\n" +
-      "[auth]\n" +
-      "[auth] Turn off with DEV_FIXED_OTP=off in .env\n" +
+      (TESTING_MODE
+        ? "[auth] Reason: TESTING_MODE=true. This OVERRIDES the production\n" +
+          `[auth] guard - NODE_ENV is "${process.env.NODE_ENV || "(unset)"}" and the\n` +
+          "[auth] bypass is on regardless. That is deliberate, for QA.\n" +
+          "[auth]\n" +
+          "[auth] TURN IT OFF BEFORE THE FIRST REAL USER:\n" +
+          "[auth]   delete TESTING_MODE from the environment,\n" +
+          "[auth]   set NODE_ENV=production,\n" +
+          "[auth]   and make sure MSG91_AUTH_KEY / MSG91_TEMPLATE_ID are set.\n"
+        : `[auth] NODE_ENV is "${process.env.NODE_ENV || "(unset)"}". This is only\n` +
+          "[auth] disabled when NODE_ENV=production - make sure your deployed\n" +
+          "[auth] server sets it.\n" +
+          "[auth]\n" +
+          "[auth] Turn off with DEV_FIXED_OTP=off in .env\n") +
       "[auth] **************************************************************\n",
   );
 
@@ -386,11 +501,17 @@ export const sendOtpService = async (
 
   assertWithinSendLimits(user, now);
 
-  trace(
-    "4/6",
-    `throttle passed (window ${user.otpSendCount || 0}/${SEND_LIMIT_PER_WINDOW}, ` +
-      `today ${user.otpDailyCount || 0}/${SEND_LIMIT_PER_DAY})`,
-  );
+  {
+    const L = limits();
+
+    trace(
+      "4/6",
+      `throttle passed (window ${user.otpSendCount || 0}/${L.perWindow}, ` +
+        `today ${user.otpDailyCount || 0}/${L.perDay}` +
+        (L.noSms ? ", relaxed - no SMS is sent in fixed-OTP mode" : "") +
+        ")",
+    );
+  }
 
   const otp = FIXED_OTP || generateOtp();
 
@@ -455,14 +576,24 @@ export const sendOtpService = async (
 
     return {
       success: true,
-      message: `Development mode - use ${otp}.`,
+      message: `Testing mode - use ${otp}.`,
       delivered: false,
+
+      /*
+      | The app renders its own testing banner from these two. Sending the
+      | code back is only safe BECAUSE it is the same fixed code for every
+      | number - there is no secret here to leak. The moment real OTPs are
+      | switched on, FIXED_OTP is null, this branch never runs, and neither
+      | field is ever sent.
+      */
+      testingMode: true,
+      testingOtp: otp,
 
       phone,
       countryCode: rule.code,
       dialCode: rule.dialCode,
       expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
-      resendAfterSeconds: Math.floor(MIN_RESEND_GAP_MS / 1000),
+      resendAfterSeconds: Math.floor(limits().resendGapMs / 1000),
       devOtp: otp,
     };
   }
@@ -514,7 +645,7 @@ export const sendOtpService = async (
       countryCode: rule.code,
       dialCode: rule.dialCode,
       expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
-      resendAfterSeconds: Math.floor(MIN_RESEND_GAP_MS / 1000),
+      resendAfterSeconds: Math.floor(limits().resendGapMs / 1000),
       devOtp: otp,
     };
   }
@@ -576,7 +707,7 @@ export const sendOtpService = async (
     countryCode: rule.code,
     dialCode: rule.dialCode,
     expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
-    resendAfterSeconds: Math.floor(MIN_RESEND_GAP_MS / 1000),
+    resendAfterSeconds: Math.floor(limits().resendGapMs / 1000),
   };
 };
 
