@@ -21,7 +21,7 @@ const router = Router();
 | it is meant to be checked BEFORE you can log in. Safe to delete at launch.
 */
 
-// router.get("/mode", otpMode);
+router.get("/mode", otpMode);
 
 router.post("/send-otp", sendOtp);
 

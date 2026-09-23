@@ -61,6 +61,31 @@ const userSchema = new mongoose.Schema(
       default: "",
     },
 
+    /*
+    |----------------------------------------------------------------------
+    | Roles
+    |----------------------------------------------------------------------
+    |
+    | `role` is the original single-value field and is KEPT, because
+    | auth, admin checks and several existing queries read it. Nothing
+    | about it changes.
+    |
+    | What it cannot express is the thing this app actually needs: the same
+    | person is very often both. A club captain who also runs the ground
+    | behind his house is one human being with one phone number, and asking
+    | him to keep two logins - or to pick one and lose the other - is the
+    | fastest way to lose him.
+    |
+    | So `roles` is the real answer: a set, added to and never swapped. A
+    | player who lists a ground becomes ["player", "ground_owner"] and stays
+    | a player. `activeRole` is only which hat the APP is currently
+    | wearing - which navigator to open, which home screen to show - and it
+    | carries no permission of its own. Every permission check in the
+    | grounds module asks the database who owns the ground, never what
+    | `activeRole` claims, because a value the client can set is not a
+    | permission.
+    */
+
     role: {
       type: String,
       enum: [
@@ -72,6 +97,19 @@ const userSchema = new mongoose.Schema(
         "admin",
       ],
       default: "user",
+    },
+
+    roles: {
+      type: [String],
+      enum: ["player", "ground_owner", "shop_owner", "admin"],
+      default: ["player"],
+    },
+
+    /* Which mode the app opens in. A preference, not a permission. */
+    activeRole: {
+      type: String,
+      enum: ["player", "ground_owner", "shop_owner"],
+      default: "player",
     },
 
     isVerified: {

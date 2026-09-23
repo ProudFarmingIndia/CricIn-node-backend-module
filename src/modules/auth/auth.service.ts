@@ -341,8 +341,39 @@ const TRACE = process.env.NODE_ENV !== "production";
 |
 */
 
-export const TESTING_MODE =
-  String(process.env.TESTING_MODE || "").trim().toLowerCase() === "true";
+/*
+| Accepts the spellings people actually type into a hosting dashboard.
+|
+| This was `=== "true"` and nothing else, which meant TESTING_MODE=1 - a
+| completely reasonable thing to type - silently evaluated to false and the
+| server quietly kept sending real OTPs, with no hint anywhere as to why.
+| An auth flag that fails closed is right; one that fails closed SILENTLY on
+| a typo is how an afternoon disappears.
+|
+| Anything else set on it is loud rather than ignored: setting the variable
+| at all is a clear intent, so a value that does not parse deserves a line
+| in the log rather than silence.
+*/
+
+const TRUTHY = new Set(["true", "1", "yes", "y", "on", "enabled"]);
+
+const FALSY = new Set(["false", "0", "no", "n", "off", "disabled", ""]);
+
+export const TESTING_MODE = (() => {
+  const raw = String(process.env.TESTING_MODE ?? "").trim().toLowerCase();
+
+  if (TRUTHY.has(raw)) return true;
+
+  if (!FALSY.has(raw)) {
+    console.warn(
+      `[auth] TESTING_MODE="${process.env.TESTING_MODE}" is not a value I ` +
+        `recognise, so it is being read as OFF and real OTPs will be sent. ` +
+        `Use TESTING_MODE=true.`,
+    );
+  }
+
+  return false;
+})();
 
 const FIXED_OTP: string | null = (() => {
   /*
