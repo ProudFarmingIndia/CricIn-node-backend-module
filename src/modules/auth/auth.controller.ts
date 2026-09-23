@@ -6,6 +6,7 @@ import {
   sendOtpService,
   verifyOtpService,
   resendOtpService,
+  getOtpMode,
 } from "./auth.service";
 
 /*
@@ -44,6 +45,31 @@ const clientIp = (req: Request): string | undefined =>
     (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
     req.socket?.remoteAddress) ??
   undefined;
+
+/*
+|--------------------------------------------------------------------------
+| Which OTP mode is this server actually in?
+|--------------------------------------------------------------------------
+|
+| Exists because the answer was previously unknowable from outside. `.env`
+| is gitignored so it never reaches the host, the host sets its own
+| NODE_ENV=production, and the fixed-code guard then turned itself off
+| silently - leaving an APK asking for a real OTP while the laptop happily
+| accepted 123456.
+|
+| Open this in a browser against whichever server the app points at and it
+| says which mode that server is in. No auth, because the whole point is to
+| check it before you can log in.
+|
+| Returns no code and no credential - see the note on getOtpMode.
+*/
+
+export const otpMode = async (_req: Request, res: Response) => {
+  return res.status(HTTP_STATUS.OK).json({
+    success: true,
+    ...getOtpMode(),
+  });
+};
 
 export const sendOtp = async (req: Request, res: Response) => {
   const { phone, countryCode } = req.body || {};
