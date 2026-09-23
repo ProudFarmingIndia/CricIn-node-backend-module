@@ -203,6 +203,45 @@ export const NOTIFICATION_TYPES = {
   GROUND_BOOKING_CANCELLED: "GROUND_BOOKING_CANCELLED",
 
   /*
+  | The owner proposed a different time. This is a separate type from
+  | APPROVED because the player has something to DO about it - the app
+  | shows accept / decline buttons on this one and nothing on the other.
+  */
+  GROUND_BOOKING_COUNTERED: "GROUND_BOOKING_COUNTERED",
+
+  GROUND_BOOKING_COUNTER_ACCEPTED: "GROUND_BOOKING_COUNTER_ACCEPTED",
+
+  GROUND_BOOKING_COUNTER_DECLINED: "GROUND_BOOKING_COUNTER_DECLINED",
+
+  /*
+  | Nobody answered in time and the slot went back on the market. Sent to
+  | the player, because otherwise they turn up to a ground that never
+  | agreed to anything.
+  */
+  GROUND_BOOKING_EXPIRED: "GROUND_BOOKING_EXPIRED",
+
+  GROUND_BOOKING_REMINDER: "GROUND_BOOKING_REMINDER",
+
+  /* The owner marked the side as arrived. */
+  GROUND_CHECKED_IN: "GROUND_CHECKED_IN",
+
+  GROUND_SESSION_COMPLETED: "GROUND_SESSION_COMPLETED",
+
+  /*
+  | The previous booking overran and this one lost time. The system worked
+  | that out from two timestamps, so this tells the affected side what it
+  | already did about it rather than asking them to complain.
+  */
+  GROUND_DELAY_COMPENSATION: "GROUND_DELAY_COMPENSATION",
+
+  /* Post-match nudge to rate the ground. */
+  GROUND_REVIEW_REQUEST: "GROUND_REVIEW_REQUEST",
+
+  GROUND_REVIEW_RECEIVED: "GROUND_REVIEW_RECEIVED",
+
+  GROUND_REVIEW_REPLY: "GROUND_REVIEW_REPLY",
+
+  /*
   |--------------------------------------------------------------------------
   | Chat
   |--------------------------------------------------------------------------
