@@ -449,6 +449,76 @@ const FIXED_OTP: string | null = (() => {
   return raw;
 })();
 
+/*
+|--------------------------------------------------------------------------
+| Say the effective mode OUT LOUD, at boot, always
+|--------------------------------------------------------------------------
+|
+| Everything above logs when the bypass is ON. Nothing logged when it was
+| OFF - that was treated as the boring default and left silent.
+|
+| That silence cost real hours. `.env` is gitignored, so it never reaches
+| Render; Render sets NODE_ENV=production by default; TESTING_MODE was never
+| added there. The guard therefore returned null and the deployed server
+| sent real MSG91 OTPs - correctly, and completely invisibly. The APK asked
+| for a code that was going to a phone nobody owns, the Render log said
+| nothing about OTP mode at all, and the local server WAS on 123456, so
+| every local test passed.
+|
+| One unconditional line answers it. Whichever mode is live, the log says
+| so on the first line after boot, on every environment.
+|
+| It also names the reason, because "real OTP mode" without "because
+| TESTING_MODE is not set" leaves you checking the wrong three things.
+*/
+
+const describeOtpMode = () => {
+  if (FIXED_OTP) {
+    return TESTING_MODE
+      ? `FIXED CODE ${FIXED_OTP} for every number (TESTING_MODE=true)`
+      : `FIXED CODE ${FIXED_OTP} for every number (non-production default)`;
+  }
+
+  if (process.env.NODE_ENV === "production" && !TESTING_MODE) {
+    return (
+      "REAL OTPs over MSG91 - because NODE_ENV=production and TESTING_MODE " +
+      "is not set. To use 123456 on this server, set TESTING_MODE=true in " +
+      "the host's environment (NOT in .env - .env is gitignored and never " +
+      "deployed) and restart."
+    );
+  }
+
+  return "REAL OTPs over MSG91 (DEV_FIXED_OTP is off)";
+};
+
+console.log(
+  `[auth] OTP mode: ${describeOtpMode()}\n` +
+    `[auth]   NODE_ENV=${process.env.NODE_ENV || "(unset)"}  ` +
+    `TESTING_MODE=${process.env.TESTING_MODE ?? "(unset)"}  ` +
+    `DEV_FIXED_OTP=${process.env.DEV_FIXED_OTP ?? "(unset)"}  ` +
+    `MSG91=${isMsg91Configured() ? "configured" : "NOT configured"}`,
+);
+
+/*
+| The same facts, fetchable. Reading a boot log means opening the host's
+| dashboard and scrolling past a deploy; this is one URL, and it is the
+| difference between knowing which mode the live server is in and guessing.
+|
+| Deliberately returns no code and no secret. When testing mode is ON the
+| app already prints the code on the OTP screen for everyone, so there is
+| nothing here to leak; when it is OFF - the state that actually matters -
+| this says only that real OTPs are in use.
+|
+| Remove the route before launch if you would rather not advertise the
+| mode at all. The endpoint is a debugging aid, not a feature.
+*/
+
+export const getOtpMode = () => ({
+  testingMode: FIXED_OTP !== null,
+  smsConfigured: isMsg91Configured(),
+  description: describeOtpMode(),
+});
+
 const trace = (step: string, detail = "") =>
   TRACE && console.log(`[otp] ${step.padEnd(8)} ${detail}`);
 
